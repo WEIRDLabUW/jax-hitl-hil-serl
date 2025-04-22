@@ -9,7 +9,7 @@ from franka_env.envs.wrappers import (
 
 from experiments.config import DefaultTrainingConfig
 from experiments.franka_sim.wrapper import FrankaSimEnv
-from experiments.usb_pickup_insertion.wrapper import GripperPenaltyWrapper
+# from experiments.usb_pickup_insertion.wrapper import GripperPenaltyWrapper
 
 
 class TrainConfig(DefaultTrainingConfig):
@@ -35,7 +35,7 @@ class TrainConfig(DefaultTrainingConfig):
         from franka_sim.envs import PandaPickCubeGymEnv
         env = PandaPickCubeGymEnv(
             action_scale=(0.1, 1),
-            render_mode="rgb_array",
+            render_mode="human",
             image_obs=True
         )
         env = FrankaSimEnv(env)

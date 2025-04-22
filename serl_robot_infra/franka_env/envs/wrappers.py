@@ -383,6 +383,7 @@ class SimSpacemouseIntervention(gym.ActionWrapper):
             info["intervene_action"] = new_action
         info["left"] = self.left
         info["right"] = self.right
+        info["succeed"] = rew > 0 
         return obs, rew, done, truncated, info
     
 class GripperPenaltyWrapper(gym.RewardWrapper):

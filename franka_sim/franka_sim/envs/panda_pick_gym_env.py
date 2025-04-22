@@ -1,10 +1,10 @@
 from pathlib import Path
 from typing import Any, Literal, Tuple, Dict
 
-import gym
+import gymnasium as gym
 import mujoco
 import numpy as np
-from gym import spaces
+from gymnasium import spaces
 
 try:
     import mujoco_py
@@ -144,6 +144,8 @@ class PandaPickCubeGymEnv(MujocoGymEnv):
         self._viewer = MujocoRenderer(
             self.model,
             self.data,
+            width=84,
+            height=84,
         )
         self._viewer.render(self.render_mode)
 
@@ -226,7 +228,7 @@ class PandaPickCubeGymEnv(MujocoGymEnv):
         rendered_frames = []
         for cam_id in self.camera_id:
             rendered_frames.append(
-                self._viewer.render(render_mode="rgb_array", camera_id=cam_id)
+                self._viewer.render(render_mode="rgb_array")
             )
         return rendered_frames
 

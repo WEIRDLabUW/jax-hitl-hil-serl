@@ -6,7 +6,9 @@ import numpy as np
 import requests
 from pynput import keyboard
 import gymnasium as gym
+
 import mujoco
+import mujoco.viewer
 
 
 class FrankaSimEnv(gym.Wrapper):
