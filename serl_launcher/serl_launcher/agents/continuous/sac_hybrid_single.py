@@ -156,6 +156,24 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
             train=train,
         )
 
+    def forward_potential_critic(
+        self,
+        observations: Data,
+        rng: PRNGKey,
+        *,
+        grad_params: Optional[Params] = None,
+        train: bool = True,
+    ) -> jax.Array:
+        if train:
+            assert rng is not None, "Must specify rng when training"
+        return self.state.apply_fn(
+            {"params": grad_params or self.state.params},
+            observations,
+            name="potential_critic",
+            rngs={"dropout": rng} if train else {},
+            train=train,
+        )
+
     def forward_temperature(
         self, *, grad_params: Optional[Params] = None
     ) -> distrax.Distribution:
@@ -309,10 +327,13 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
             constraint_eps = self.config["cl"]["constraint_eps"]
 
             # Calculate violation (if any)
+            qf_diff_1 = constraint_coeff * o_pre_qf - o_post_qf
+            chex.assert_shape(qf_diff_1, (self.config["critic_ensemble_size"], batch_size))
+            percentage_satisfy = jnp.mean(qf_diff_1 <= constraint_eps * jnp.maximum(jnp.abs(o_pre_qf), jnp.abs(o_post_qf)))
             qf_diff = jnp.where(
-                constraint_coeff * o_pre_qf - o_post_qf <= constraint_eps * jnp.maximum(jnp.abs(o_pre_qf), jnp.abs(o_post_qf)),
+                qf_diff_1 <= constraint_eps * jnp.maximum(jnp.abs(o_pre_qf), jnp.abs(o_post_qf)),
                 0.0,
-                constraint_coeff * o_pre_qf - o_post_qf
+                qf_diff_1
             )
 
             # Apply Lagrange multiplier if available
@@ -323,9 +344,12 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
             dual_loss = jnp.multiply(alpha_state, qf_diff.T).mean()
             critic_loss += dual_loss
 
-            info["dual_loss"] = dual_loss
-            info["alpha_state"] = alpha_state.mean()
-            info["qf_diff"] = qf_diff.mean()
+            info = info | {
+                "dual_loss": dual_loss,
+                "alpha_state": alpha_state.mean(),
+                "qf_diff": qf_diff.mean(),
+                "percentage_satisfy": percentage_satisfy,
+            }
 
         return critic_loss, info
 
@@ -577,6 +601,34 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
 
         return log_alpha_loss, info
 
+    def potential_critic_loss_fn(self, batch, pref_batch, params: Params, rng: PRNGKey):
+        if pref_batch is None:
+            return 0.0, {}
+
+        rng, state_key = jax.random.split(rng)
+
+        o_pre = pref_batch["pre_obs"]
+        o_post = pref_batch["post_obs"]
+
+        pre_potential = self.forward_potential_critic(o_pre, rng=state_key, grad_params=params)
+        post_potential = self.forward_potential_critic(o_post, rng=state_key, grad_params=params)
+
+        potential_loss = jnp.where(
+            self.config["cl"]["constraint_coeff"] * pre_potential - post_potential <= 0.0,
+            0.0,
+            self.config["cl"]["constraint_coeff"] * pre_potential - post_potential
+        ).mean()
+
+        info = {
+            "potential_critic_loss": potential_loss,
+            "pre_potential": pre_potential.mean(),
+            "post_potential": post_potential.mean(),
+            "potential_diff": (post_potential - pre_potential).mean(),
+            "constraint_coeff": self.config["cl"]["constraint_coeff"],
+        }
+
+        return potential_loss, info
+
     def loss_fns(self, batch, pref_batch = None):
         loss_dict = {
             "critic": partial(self.critic_loss_fn, batch, pref_batch),
@@ -726,52 +778,6 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
         grasp_action = grasp_action - 1 # Mapping back to {-1, 0, 1}
 
         return jnp.concatenate([ee_actions, grasp_action[..., None]], axis=-1)
-
-    def forward_potential_critic(
-        self,
-        observations: Data,
-        rng: PRNGKey,
-        *,
-        grad_params: Optional[Params] = None,
-        train: bool = True,
-    ) -> jax.Array:
-        if train:
-            assert rng is not None, "Must specify rng when training"
-        return self.state.apply_fn(
-            {"params": grad_params or self.state.params},
-            observations,
-            name="potential_critic",
-            rngs={"dropout": rng} if train else {},
-            train=train,
-        )
-
-    def potential_critic_loss_fn(self, batch, pref_batch, params: Params, rng: PRNGKey):
-        if pref_batch is None:
-            return 0.0, {}
-
-        rng, state_key = jax.random.split(rng)
-
-        o_pre = pref_batch["pre_obs"]
-        o_post = pref_batch["post_obs"]
-
-        pre_potential = self.forward_potential_critic(o_pre, rng=state_key, grad_params=params)
-        post_potential = self.forward_potential_critic(o_post, rng=state_key, grad_params=params)
-
-        potential_loss = jnp.where(
-            self.config["constraint_coeff"] * pre_potential - post_potential <= 0.0,
-            0.0,
-            self.config["constraint_coeff"] * pre_potential - post_potential
-        ).mean()
-
-        info = {
-            "potential_critic_loss": potential_loss,
-            "pre_potential": pre_potential.mean(),
-            "post_potential": post_potential.mean(),
-            "potential_diff": (post_potential - pre_potential).mean(),
-            "constraint_coeff": self.config["constraint_coeff"],
-        }
-
-        return potential_loss, info
 
     @classmethod
     def create(

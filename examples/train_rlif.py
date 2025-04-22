@@ -441,14 +441,14 @@ def learner(rng, agent, replay_buffer, demo_buffer, preference_buffer = None, wa
         train_networks_to_update = frozenset({"critic", "grasp_critic", "actor", "temperature"})
 
     if FLAGS.method == "cl":
-        assert "log_alpha_state" in agent.state.params
-        assert "log_alpha_gripper_state" in agent.state.params
+        assert "modules_log_alpha_state" in agent.state.params
+        assert "modules_log_alpha_gripper_state" in agent.state.params
         train_critic_networks_to_update = frozenset(train_critic_networks_to_update | {"log_alpha_state"})
         train_networks_to_update = frozenset(train_networks_to_update | {"log_alpha_state", "log_alpha_gripper_state"})
 
     enable_potential = FLAGS.enable_potential
     if enable_potential:
-        assert "potential_critic" in agent.state.params
+        assert "modules_potential_critic" in agent.state.params
         train_critic_networks_to_update = frozenset(train_critic_networks_to_update | {"potential_critic"})
         train_networks_to_update = frozenset(train_networks_to_update | {"potential_critic"})
 
@@ -660,10 +660,7 @@ def main(_):
             enable_potential=enable_potential,
             intervene_steps=intervene_steps,
             constraint_eps=constraint_eps,
-            potential={
-                "enabled": enable_potential,
-                "reward_coeff": potential_reward_coeff,
-            } if enable_potential else None,
+            potential_reward_coeff=potential_reward_coeff,
         )
         include_grasp_penalty = True
     elif config.setup_mode == 'dual-arm-learned-gripper':
