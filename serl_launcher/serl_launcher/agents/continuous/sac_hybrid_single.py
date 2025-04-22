@@ -227,33 +227,48 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
         target_next_min_q = target_next_qs.min(axis=0)
         chex.assert_shape(target_next_min_q, (batch_size,))
 
-        target_q = (
+        target_q: jax.Array = (
             batch["rewards"]
             + self.config["discount"] * batch["masks"] * target_next_min_q
         )
         chex.assert_shape(target_q, (batch_size,))
 
+        info = {
+            "raw_q_average": target_q.mean()
+        }
+
         if self.config["backup_entropy"]:
             temperature = self.forward_temperature()
             target_q = target_q - temperature * next_actions_log_probs
+            info = info | {
+                "entropy_update_average": (temperature * next_actions_log_probs).mean(),
+            }
 
+        # Use potential based dense rewards.
         if "potential" in self.config and self.config["potential"]["enabled"]:
             rng, potential_key = jax.random.split(rng)
 
             current_potentials = self.forward_potential_critic(
                 batch["observations"], rng=potential_key
             )
+            chex.assert_shape(current_potentials, (batch_size,))
 
             next_potentials = self.forward_potential_critic(
                 batch["next_observations"], rng=potential_key
             )
+            chex.assert_shape(next_potentials, (batch_size,))
 
             # F(s, s') = γΦ(s') - Φ(s)
             reward_shaping = (
                 self.config["discount"] * next_potentials - current_potentials
             )
+            chex.assert_shape(reward_shaping, (batch_size,))
 
             target_q = target_q + self.config["potential"]["reward_coeff"] * reward_shaping
+
+            info = info | {
+                "potential_reward": self.config["potential"]["reward_coeff"] * reward_shaping,
+            }
 
         predicted_qs = self.forward_critic(
             batch["observations"], actions, rng=rng, grad_params=params
@@ -266,7 +281,7 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
         chex.assert_equal_shape([predicted_qs, target_qs])
         critic_loss = jnp.mean((predicted_qs - target_qs) ** 2)
 
-        info = {
+        info = info | {
             "critic_loss": critic_loss,
             "predicted_qs": jnp.mean(predicted_qs),
             "target_qs": jnp.mean(target_qs),
@@ -348,6 +363,33 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
         )
         chex.assert_shape(target_grasp_q, (batch_size,))
 
+        info = {}
+
+        if "potential" in self.config and self.config["potential"]["enabled"]:
+            rng, potential_key = jax.random.split(rng)
+
+            current_potentials = self.forward_potential_critic(
+                batch["observations"], rng=potential_key
+            )
+            chex.assert_shape(current_potentials, (batch_size,))
+
+            next_potentials = self.forward_potential_critic(
+                batch["next_observations"], rng=potential_key
+            )
+            chex.assert_shape(next_potentials, (batch_size,))
+
+            # F(s, s') = γΦ(s') - Φ(s)
+            reward_shaping = (
+                self.config["discount"] * next_potentials - current_potentials
+            )
+            chex.assert_shape(reward_shaping, (batch_size,))
+
+            target_grasp_q = target_grasp_q + self.config["potential"]["reward_coeff"] * reward_shaping
+
+            info = info | {
+                "potential_reward": self.config["potential"]["reward_coeff"] * reward_shaping,
+            }
+
         # Forward pass through the online grasp critic to get predicted Q-values
         predicted_grasp_qs = self.forward_grasp_critic(
             batch["observations"],
@@ -392,7 +434,7 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
             dual_loss = jnp.multiply(alpha_state, qf_diff.T).mean()
             grasp_critic_loss += dual_loss
 
-            info = {
+            info = info | {
                 "grasp_critic_loss": grasp_critic_loss,
                 "predicted_grasp_qs": jnp.mean(predicted_grasp_q),
                 "target_grasp_qs": jnp.mean(target_grasp_q),
@@ -403,7 +445,7 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
             }
             return grasp_critic_loss, info
 
-        info = {
+        info = info | {
             "grasp_critic_loss": grasp_critic_loss,
             "predicted_grasp_qs": jnp.mean(predicted_grasp_q),
             "target_grasp_qs": jnp.mean(target_grasp_q),
@@ -606,6 +648,7 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
         new_state, info = self.state.apply_loss_fns(
             loss_fns, pmap_axis=pmap_axis, has_aux=True
         )
+        assert networks_to_update.issubset(info)
 
         # Update target network (if requested)
         if "critic" in networks_to_update:
@@ -702,15 +745,6 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
             train=train,
         )
 
-    def forward_target_potential_critic(
-        self,
-        observations: Data,
-        rng: PRNGKey,
-    ) -> jax.Array:
-        return self.forward_potential_critic(
-            observations, rng=rng, grad_params=self.state.target_params
-        )
-
     def potential_critic_loss_fn(self, batch, pref_batch, params: Params, rng: PRNGKey):
         if pref_batch is None:
             return 0.0, {}
@@ -734,6 +768,7 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
             "pre_potential": pre_potential.mean(),
             "post_potential": post_potential.mean(),
             "potential_diff": (post_potential - pre_potential).mean(),
+            "constraint_coeff": self.config["constraint_coeff"],
         }
 
         return potential_loss, info

@@ -39,7 +39,7 @@ from experiments.mappings import CONFIG_MAPPING
 FLAGS = flags.FLAGS
 
 flags.DEFINE_string("exp_name", None, "Name of experiment corresponding to folder.")
-flags.DEFINE_string("method", "rlif", "valid values: rlif, cl, hil, potential")
+flags.DEFINE_string("method", "rlif", "valid values: rlif, cl, hil")
 flags.DEFINE_integer("seed", 42, "Random seed.")
 flags.DEFINE_boolean("learner", False, "Whether this is a learner.")
 flags.DEFINE_boolean("actor", False, "Whether this is an actor.")
@@ -49,6 +49,7 @@ flags.DEFINE_string("checkpoint_path", None, "Path to save checkpoints.")
 flags.DEFINE_integer("eval_checkpoint_step", 0, "Step to evaluate the checkpoint.")
 flags.DEFINE_integer("eval_n_trajs", 0, "Number of trajectories to evaluate.")
 flags.DEFINE_boolean("save_video", False, "Save video.")
+flags.DEFINE_boolean("enable_potential", False, "Whether or not to use potential-based reward shaping.")
 flags.DEFINE_float("potential_reward_coeff", 1.0, "Coefficient for potential-based reward shaping.")
 
 flags.DEFINE_boolean(
@@ -439,11 +440,15 @@ def learner(rng, agent, replay_buffer, demo_buffer, preference_buffer = None, wa
         train_critic_networks_to_update = frozenset({"critic", "grasp_critic"})
         train_networks_to_update = frozenset({"critic", "grasp_critic", "actor", "temperature"})
 
-    if FLAGS.method == "cl" and "log_alpha_state" in agent.state.params:
+    if FLAGS.method == "cl":
+        assert "log_alpha_state" in agent.state.params
+        assert "log_alpha_gripper_state" in agent.state.params
         train_critic_networks_to_update = frozenset(train_critic_networks_to_update | {"log_alpha_state"})
-        train_networks_to_update = frozenset(train_networks_to_update | {"log_alpha_state"})
+        train_networks_to_update = frozenset(train_networks_to_update | {"log_alpha_state", "log_alpha_gripper_state"})
 
-    if FLAGS.method == "potential" and "potential_critic" in agent.state.params:
+    enable_potential = FLAGS.enable_potential
+    if enable_potential:
+        assert "potential_critic" in agent.state.params
         train_critic_networks_to_update = frozenset(train_critic_networks_to_update | {"potential_critic"})
         train_networks_to_update = frozenset(train_networks_to_update | {"potential_critic"})
 
@@ -605,7 +610,7 @@ def main(_):
     global config
     config = CONFIG_MAPPING[FLAGS.exp_name]()
     enable_cl = FLAGS.method == "cl"
-    enable_potential = FLAGS.method == "potential"
+    enable_potential = FLAGS.enable_potential
 
     if config.rlif_minus_one:
         print_green("Using RLIF.")
@@ -642,7 +647,7 @@ def main(_):
     elif config.setup_mode == 'single-arm-learned-gripper':
         intervene_steps = 0  # Default number of steps between pre and post intervention states
         constraint_eps = 0.1  # Default constraint epsilon
-        potential_reward_coeff = FLAGS.potential_reward_coeff if hasattr(FLAGS, 'potential_reward_coeff') else 1.0
+        potential_reward_coeff = FLAGS.potential_reward_coeff
 
         agent: SACAgentHybridSingleArm = make_sac_pixel_agent_hybrid_single_arm(
             seed=FLAGS.seed,
