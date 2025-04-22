@@ -19,10 +19,10 @@ from serl_launcher.vision.data_augmentations import batched_random_crop
 
 
 def make_bc_agent(
-    seed, 
-    sample_obs, 
-    sample_action, 
-    image_keys=("image",), 
+    seed,
+    sample_obs,
+    sample_action,
+    image_keys=("image",),
     encoder_type="resnet-pretrained"
 ):
     return BCAgent.create(
@@ -152,8 +152,10 @@ def make_sac_pixel_agent_hybrid_single_arm(
     target_entropy=None,
     discount=0.97,
     enable_cl=False,
+    enable_potential=False,
     intervene_steps=0,
     constraint_eps=0.1,
+    potential_reward_coeff=1.0,
 ):
     agent = SACAgentHybridSingleArm.create_pixels(
         jax.random.PRNGKey(seed),
@@ -188,6 +190,11 @@ def make_sac_pixel_agent_hybrid_single_arm(
             "use_layer_norm": True,
             "hidden_dims": [256, 256],
         },
+        potential_critic_network_kwargs={
+            "activations": nn.tanh,
+            "use_layer_norm": True,
+            "hidden_dims": [256, 256],
+        },
         temperature_init=1e-2,
         discount=discount,
         backup_entropy=False,
@@ -197,12 +204,17 @@ def make_sac_pixel_agent_hybrid_single_arm(
         target_entropy=target_entropy,
         augmentation_function=make_batch_augmentation_func(image_keys),
         enable_cl=enable_cl,
+        enable_potential=enable_potential,
         intervene_steps=intervene_steps,
         cl={
             "enabled": enable_cl,
             "constraint_eps": constraint_eps,
             "constraint_coeff": discount**intervene_steps,
-        }
+        },
+        potential={
+            "enabled": enable_potential,
+            "reward_coeff": potential_reward_coeff,
+        } if enable_potential else None
     )
     return agent
 
@@ -266,7 +278,7 @@ def linear_schedule(step):
     linear_step = jnp.minimum(step, decay_steps)
     decayed_value = init_value + (end_value - init_value) * (linear_step / decay_steps)
     return decayed_value
-    
+
 def make_batch_augmentation_func(image_keys) -> callable:
 
     def data_augmentation_fn(rng, observations):
@@ -279,7 +291,7 @@ def make_batch_augmentation_func(image_keys) -> callable:
                 }
             )
         return observations
-    
+
     def augment_batch(batch: Batch, rng: PRNGKey) -> Batch:
         rng, obs_rng, next_obs_rng = jax.random.split(rng, 3)
         obs = data_augmentation_fn(obs_rng, batch["observations"])
@@ -291,7 +303,7 @@ def make_batch_augmentation_func(image_keys) -> callable:
             }
         )
         return batch
-    
+
     return augment_batch
 
 

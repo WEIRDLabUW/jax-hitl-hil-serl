@@ -12,7 +12,7 @@ from serl_launcher.common.common import JaxRLTrainState, ModuleDict, nonpytree_f
 from serl_launcher.common.encoding import EncodingWrapper
 from serl_launcher.common.optimizers import make_optimizer
 from serl_launcher.common.typing import Batch, Data, Params, PRNGKey
-from serl_launcher.networks.actor_critic_nets import Critic, Policy, GraspCritic, ensemblize, AlphaNetwork
+from serl_launcher.networks.actor_critic_nets import Critic, Policy, GraspCritic, ensemblize, AlphaNetwork, ValueCritic
 from serl_launcher.networks.lagrange import GeqLagrangeMultiplier
 from serl_launcher.networks.mlp import MLP
 from serl_launcher.utils.train_utils import _unpack
@@ -236,6 +236,24 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
         if self.config["backup_entropy"]:
             temperature = self.forward_temperature()
             target_q = target_q - temperature * next_actions_log_probs
+
+        if "potential" in self.config and self.config["potential"]["enabled"]:
+            rng, potential_key = jax.random.split(rng)
+
+            current_potentials = self.forward_potential_critic(
+                batch["observations"], rng=potential_key
+            )
+
+            next_potentials = self.forward_potential_critic(
+                batch["next_observations"], rng=potential_key
+            )
+
+            # F(s, s') = γΦ(s') - Φ(s)
+            reward_shaping = (
+                self.config["discount"] * next_potentials - current_potentials
+            )
+
+            target_q = target_q + self.config["potential"]["reward_coeff"] * reward_shaping
 
         predicted_qs = self.forward_critic(
             batch["observations"], actions, rng=rng, grad_params=params
@@ -530,6 +548,10 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
             loss_dict["log_alpha_state"] = partial(self.log_alpha_state_loss_fn, pref_batch)
             loss_dict["log_alpha_gripper_state"] = partial(self.log_alpha_gripper_state_loss_fn, pref_batch)
 
+        if "potential" in self.config and self.config["potential"]["enabled"] and pref_batch is not None:
+            print("Doing potential update.")
+            loss_dict["potential_critic"] = partial(self.potential_critic_loss_fn, batch, pref_batch)
+
         return loss_dict
 
     @partial(jax.jit, static_argnames=("pmap_axis", "networks_to_update"))
@@ -539,7 +561,7 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
         *,
         pmap_axis: Optional[str] = None,
         networks_to_update: FrozenSet[str] = frozenset(
-            {"actor", "critic", "grasp_critic", "temperature"}
+            {"actor", "critic", "grasp_critic", "temperature", "potential_critic", "log_alpha_state", "log_alpha_gripper_state"}
         ),
         pref_batch = None,
         **kwargs
@@ -662,6 +684,60 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
 
         return jnp.concatenate([ee_actions, grasp_action[..., None]], axis=-1)
 
+    def forward_potential_critic(
+        self,
+        observations: Data,
+        rng: PRNGKey,
+        *,
+        grad_params: Optional[Params] = None,
+        train: bool = True,
+    ) -> jax.Array:
+        if train:
+            assert rng is not None, "Must specify rng when training"
+        return self.state.apply_fn(
+            {"params": grad_params or self.state.params},
+            observations,
+            name="potential_critic",
+            rngs={"dropout": rng} if train else {},
+            train=train,
+        )
+
+    def forward_target_potential_critic(
+        self,
+        observations: Data,
+        rng: PRNGKey,
+    ) -> jax.Array:
+        return self.forward_potential_critic(
+            observations, rng=rng, grad_params=self.state.target_params
+        )
+
+    def potential_critic_loss_fn(self, batch, pref_batch, params: Params, rng: PRNGKey):
+        if pref_batch is None:
+            return 0.0, {}
+
+        rng, state_key = jax.random.split(rng)
+
+        o_pre = pref_batch["pre_obs"]
+        o_post = pref_batch["post_obs"]
+
+        pre_potential = self.forward_potential_critic(o_pre, rng=state_key, grad_params=params)
+        post_potential = self.forward_potential_critic(o_post, rng=state_key, grad_params=params)
+
+        potential_loss = jnp.where(
+            self.config["constraint_coeff"] * pre_potential - post_potential <= 0.0,
+            0.0,
+            self.config["constraint_coeff"] * pre_potential - post_potential
+        ).mean()
+
+        info = {
+            "potential_critic_loss": potential_loss,
+            "pre_potential": pre_potential.mean(),
+            "post_potential": post_potential.mean(),
+            "potential_diff": (post_potential - pre_potential).mean(),
+        }
+
+        return potential_loss, info
+
     @classmethod
     def create(
         cls,
@@ -675,6 +751,7 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
         temperature_def: nn.Module,
         log_alpha_state_def: nn.Module = None,
         log_alpha_gripper_state_def: nn.Module = None,
+        potential_critic_def: nn.Module = None,
         # Optimizer
         actor_optimizer_kwargs={
             "learning_rate": 3e-4,
@@ -689,6 +766,9 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
             "learning_rate": 3e-4,
         },
         temperature_optimizer_kwargs={
+            "learning_rate": 3e-4,
+        },
+        potential_critic_optimizer_kwargs={
             "learning_rate": 3e-4,
         },
         # Algorithm config
@@ -715,6 +795,8 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
             networks["log_alpha_state"] = log_alpha_state_def
         if log_alpha_gripper_state_def is not None:
             networks["log_alpha_gripper_state"] = log_alpha_gripper_state_def
+        if potential_critic_def is not None:
+            networks["potential_critic"] = potential_critic_def
 
         model_def = ModuleDict(networks)
 
@@ -728,6 +810,8 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
         if log_alpha_state_def is not None:
             txs["log_alpha_state"] = make_optimizer(**log_alpha_optimizer_kwargs)
             txs["log_alpha_gripper_state"] = make_optimizer(**log_alpha_optimizer_kwargs)
+        if potential_critic_def is not None:
+            txs["potential_critic"] = make_optimizer(**potential_critic_optimizer_kwargs)
 
         rng, init_rng = jax.random.split(rng)
 
@@ -744,6 +828,10 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
             # Create dummy input with the right shape for initialization
             init_dict["log_alpha_state"] = [observations, observations]
             init_dict["log_alpha_gripper_state"] = [observations, observations]
+
+        # Add potential_critic initialization if present
+        if potential_critic_def is not None:
+            init_dict["potential_critic"] = [observations]
 
         params = model_def.init(init_rng, **init_dict)["params"]
 
@@ -788,6 +876,18 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
                 cl_config.update(kwargs["cl"])
             config_dict["cl"] = cl_config
 
+        # Add potential configuration if potential_critic is provided
+        if potential_critic_def is not None:
+            # Default potential configuration
+            potential_config = {
+                "enabled": True,
+                "reward_coeff": 1.0,
+            }
+            # Update with any user-provided potential settings
+            if "potential" in kwargs:
+                potential_config.update(kwargs["potential"])
+            config_dict["potential"] = potential_config
+
         return cls(
             state=state,
             config=config_dict,
@@ -818,11 +918,15 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
         log_alpha_network_kwargs: dict = {
             "hidden_dims": [256, 256],
         },
+        potential_critic_network_kwargs: dict = {
+            "hidden_dims": [256, 256],
+        },
         critic_ensemble_size: int = 2,
         critic_subsample_size: Optional[int] = None,
         temperature_init: float = 1.0,
         image_keys: Iterable[str] = ("image",),
         augmentation_function: Optional[callable] = None,
+        enable_potential: bool = False,
         **kwargs,
     ):
         """
@@ -878,7 +982,8 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
             "critic": encoder_def,
             "actor": encoder_def,
             "grasp_critic": encoder_def,
-            'log_alpha': encoder_def,
+            "log_alpha": encoder_def,
+            "potential_critic": encoder_def,
         }
 
         # Define networks
@@ -935,6 +1040,15 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
                 output_dim=1,
             )(name="log_alpha_gripper_state")
 
+        potential_critic_def = None
+        if enable_potential:
+            potential_critic_backbone = MLP(**potential_critic_network_kwargs)
+            potential_critic_def = partial(
+                ValueCritic,
+                encoder=encoders["potential_critic"],
+                network=potential_critic_backbone
+            )(name="potential_critic")
+
         agent = cls.create(
             rng,
             observations,
@@ -945,6 +1059,7 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
             temperature_def=temperature_def,
             log_alpha_state_def=log_alpha_state_def,
             log_alpha_gripper_state_def=log_alpha_gripper_state_def,
+            potential_critic_def=potential_critic_def,
             critic_ensemble_size=critic_ensemble_size,
             critic_subsample_size=critic_subsample_size,
             image_keys=image_keys,
