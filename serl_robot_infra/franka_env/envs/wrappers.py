@@ -335,7 +335,57 @@ class DualSpacemouseIntervention(gym.ActionWrapper):
     def reset(self, **kwargs):
         return self.env.reset(**kwargs)
 
+class SimSpacemouseIntervention(gym.ActionWrapper):
+    def __init__(self, env, action_indices=None):
+        super().__init__(env)
 
+        self.gripper_enabled = True
+        self.expert = SpaceMouseExpert()
+        self.left, self.right = False, False
+        self.action_indices = action_indices
+
+    def action(self, action: np.ndarray) -> np.ndarray:
+        """
+        Input:
+        - action: policy action
+        Output:
+        - action: spacemouse action if nonezero; else, policy action
+        """
+        expert_a, buttons = self.expert.get_action()
+        self.left, self.right = tuple(buttons)
+        intervened = False
+        
+        if np.linalg.norm(expert_a) > 0.001:
+            intervened = True
+
+        if self.gripper_enabled:
+            if self.left:  # close gripper
+                gripper_action = np.random.uniform(-1, -0.9, size=(1,))
+                intervened = True
+            elif self.right:  # open gripper
+                gripper_action = np.random.uniform(0.9, 1, size=(1,))
+                intervened = True
+            else:
+                gripper_action = np.zeros((1,))
+            expert_a = np.concatenate((expert_a[:3], gripper_action), axis=0)
+
+        if intervened:
+            return expert_a, True
+
+        return action, False
+
+    def step(self, action):
+
+        new_action, replaced = self.action(action)
+
+        obs, rew, done, truncated, info = self.env.step(new_action)
+        if replaced:
+            info["intervene_action"] = new_action
+        info["left"] = self.left
+        info["right"] = self.right
+        info["succeed"] = rew > 0 
+        return obs, rew, done, truncated, info
+    
 class GripperPenaltyWrapper(gym.RewardWrapper):
     def __init__(self, env, penalty=0.1):
         super().__init__(env)
