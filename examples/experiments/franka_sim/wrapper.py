@@ -12,10 +12,15 @@ import mujoco.viewer
 
 
 class FrankaSimEnv(gym.Wrapper):
-    def __init__(self, env):
+    def __init__(
+            self,
+            env,
+            action_scale: list = [1, 1, 1]
+        ):
         super().__init__(env)
         m = env.model
         d = env.data
+        self.action_scale = np.array(action_scale)
         self.viewer = mujoco.viewer.launch_passive(m, d)
 
     def reset(self, *args, **kwargs):
@@ -23,6 +28,8 @@ class FrankaSimEnv(gym.Wrapper):
 
 
     def step(self, action):
+        assert action.shape == (4,)
+        action[:3] *= self.action_scale
         step_start = time.time()
         vals = super().step(action)
         self.viewer.sync()

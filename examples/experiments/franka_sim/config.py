@@ -6,6 +6,7 @@ import numpy as np
 from franka_env.envs.wrappers import (
     SimSpacemouseIntervention,
 )
+from serl_launcher.wrappers.serl_obs_wrappers import SERLObsWrapper
 
 from experiments.config import DefaultTrainingConfig
 from experiments.franka_sim.wrapper import FrankaSimEnv
@@ -13,16 +14,16 @@ from experiments.franka_sim.wrapper import FrankaSimEnv
 
 
 class TrainConfig(DefaultTrainingConfig):
-    image_keys = ["side_1"]
-    classifier_keys = ["side_1"]
-    proprio_keys = ["tcp_pose", "tcp_vel", "tcp_force", "tcp_torque", "gripper_pose"]
+    image_keys = ["front"]
+    classifier_keys = ["front"]
+    proprio_keys = ['panda/tcp_pos', 'panda/tcp_vel', 'panda/gripper_pos']
     # buffer_period = 1000
     # checkpoint_period = 5000
     # steps_per_update = 50
     pretraining_steps = 0 # How many steps to pre-train the model for using RLPD on offline data only.
-    reward_scale = 1 # How much to scale actual rewards (not RLIF penalties) for RLIF.
-    rlif_minus_one = False
-    checkpoint_period = 4000
+    reward_scale = 10 # How much to scale actual rewards (not RLIF penalties) for RLIF.
+    rlif_minus_one = True
+    checkpoint_period = 2000
     cta_ratio = 2
     random_steps = 0
     discount = 0.98
@@ -36,8 +37,11 @@ class TrainConfig(DefaultTrainingConfig):
         env = PandaPickCubeGymEnv(
             action_scale=(0.1, 1),
             render_mode="human",
-            image_obs=True
+            image_obs=True,
+            control_dt=0.1,
+            time_limit=100,
         )
-        env = FrankaSimEnv(env)
+        env = FrankaSimEnv(env, action_scale=[0.1, 0.1, 0.1])
+        env = SERLObsWrapper(env, proprio_keys=self.proprio_keys)
         env = SimSpacemouseIntervention(env)
         return env

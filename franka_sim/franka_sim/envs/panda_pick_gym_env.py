@@ -5,6 +5,9 @@ import gymnasium as gym
 import mujoco
 import numpy as np
 from gymnasium import spaces
+import threading
+import cv2
+import queue
 
 try:
     import mujoco_py
@@ -21,6 +24,27 @@ _XML_PATH = _HERE / "xmls" / "arena.xml"
 _PANDA_HOME = np.asarray((0, -0.785, 0, -2.35, 0, 1.57, np.pi / 4))
 _CARTESIAN_BOUNDS = np.asarray([[0.2, -0.3, 0], [0.6, 0.3, 0.5]])
 _SAMPLING_BOUNDS = np.asarray([[0.25, -0.25], [0.55, 0.25]])
+
+
+class ImageDisplayer(threading.Thread):
+    def __init__(self, queue, name):
+        threading.Thread.__init__(self)
+        self.queue = queue
+        self.daemon = True  # make this a daemon thread
+        self.name = name
+
+    def run(self):
+        while True:
+            img_array = self.queue.get()  # retrieve an image from the queue
+            if img_array is None:  # None is our signal to exit
+                break
+
+            frame = np.concatenate(
+                [cv2.resize(v, (128, 128)) for k, v in img_array.items() if "full" not in k], axis=1
+            )
+
+            cv2.imshow(self.name, frame)
+            cv2.waitKey(1)
 
 
 class PandaPickCubeGymEnv(MujocoGymEnv):
@@ -144,8 +168,8 @@ class PandaPickCubeGymEnv(MujocoGymEnv):
         self._viewer = MujocoRenderer(
             self.model,
             self.data,
-            width=84,
-            height=84,
+            # width=84,
+            # height=84,
         )
         self._viewer.render(self.render_mode)
 
@@ -220,9 +244,10 @@ class PandaPickCubeGymEnv(MujocoGymEnv):
 
         obs = self._compute_observation()
         rew = self._compute_reward()
+        success = self._compute_success()
         terminated = self.time_limit_exceeded()
 
-        return obs, rew, terminated, False, {}
+        return obs, bool(success), success or terminated, False, {'success': success}
 
     def render(self):
         rendered_frames = []
@@ -288,6 +313,10 @@ class PandaPickCubeGymEnv(MujocoGymEnv):
         r_lift = np.clip(r_lift, 0.0, 1.0)
         rew = 0.3 * r_close + 0.7 * r_lift
         return rew
+    
+    def _compute_success(self) -> bool:
+        block_pos = self._data.sensor("block_pos").data
+        return block_pos[2] > self._z_success
 
 
 if __name__ == "__main__":
