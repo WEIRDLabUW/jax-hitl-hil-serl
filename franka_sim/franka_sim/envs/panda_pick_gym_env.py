@@ -157,8 +157,8 @@ class PandaPickCubeGymEnv(MujocoGymEnv):
             )
 
         self.action_space = gym.spaces.Box(
-            low=np.asarray([-1.0, -1.0, -1.0, -1.0]),
-            high=np.asarray([1.0, 1.0, 1.0, 1.0]),
+            low=np.asarray([-1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0]),
+            high=np.asarray([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
             dtype=np.float32,
         )
 
@@ -166,8 +166,8 @@ class PandaPickCubeGymEnv(MujocoGymEnv):
         # is possible to add a similar viewer feature with gym, but that can be a future TODO
         from gymnasium.envs.mujoco.mujoco_rendering import MujocoRenderer
 
-        self.model.vis.global_.offwidth = 256
-        self.model.vis.global_.offheight = 256
+        self.model.vis.global_.offwidth = 128
+        self.model.vis.global_.offheight = 128
         self._viewer = MujocoRenderer(
             self.model,
             self.data,
@@ -219,6 +219,8 @@ class PandaPickCubeGymEnv(MujocoGymEnv):
             truncated: bool,
             info: dict[str, Any]
         """
+        assert action.shape == (7,)
+        action = np.concatenate((action[:3], action[6:]), axis=0)
         x, y, z, grasp = action
 
         # Set the mocap position.

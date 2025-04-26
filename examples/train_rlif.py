@@ -15,6 +15,7 @@ from gymnasium.wrappers.record_episode_statistics import RecordEpisodeStatistics
 from natsort import natsorted
 from pynput import keyboard
 import requests
+import cv2
 
 from serl_launcher.agents.continuous.sac import SACAgent
 from serl_launcher.agents.continuous.sac_hybrid_single import SACAgentHybridSingleArm
@@ -722,6 +723,10 @@ def main(_):
             with open(path, "rb") as f:
                 transitions = pkl.load(f)
                 for transition in transitions:
+                    for k in set(transition['observations'].keys()) - set(config.image_keys + ['state']):
+                        del transition['observations'][k]
+                    for k in config.image_keys:
+                        transition['observations'][k] = cv2.resize(transition['observations'][k], (128, 128))
                     if 'infos' in transition and 'grasp_penalty' in transition['infos']:
                         transition['grasp_penalty'] = transition['infos']['grasp_penalty']
                     assert transition['rewards'] < 1 + 1e-6 and transition['rewards'] > -1e-6, f"{transition['rewards']}"

@@ -105,18 +105,20 @@ class Quat2EulerWrapper(gym.ObservationWrapper):
     Convert the quaternion representation of the tcp pose to euler angles
     """
 
-    def __init__(self, env: Env):
+    def __init__(self, env: Env, position_key: str = "tcp_pose"):
         super().__init__(env)
-        assert env.observation_space["state"]["tcp_pose"].shape == (7,)
+        self.position_key = position_key
+        assert self.position_key in env.observation_space["state"].keys(), f"{self.position_key} not in {env.observation_space['state'].keys()}"
+        assert env.observation_space["state"][self.position_key].shape == (7,), f"{env.observation_space['state'][self.position_key].shape}"
         # from xyz + quat to xyz + euler
-        self.observation_space["state"]["tcp_pose"] = spaces.Box(
+        self.observation_space["state"][self.position_key] = spaces.Box(
             -np.inf, np.inf, shape=(6,)
         )
 
     def observation(self, observation):
         # convert tcp pose from quat to euler
-        tcp_pose = observation["state"]["tcp_pose"]
-        observation["state"]["tcp_pose"] = np.concatenate(
+        tcp_pose = observation["state"][self.position_key]
+        observation["state"][self.position_key] = np.concatenate(
             (tcp_pose[:3], R.from_quat(tcp_pose[3:]).as_euler("xyz"))
         )
         return observation

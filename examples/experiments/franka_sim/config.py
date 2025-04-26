@@ -5,17 +5,19 @@ import numpy as np
 
 from franka_env.envs.wrappers import (
     SimSpacemouseIntervention,
+    Quat2EulerWrapper,
 )
 from serl_launcher.wrappers.serl_obs_wrappers import SERLObsWrapper
 
 from experiments.config import DefaultTrainingConfig
 from experiments.franka_sim.wrapper import FrankaSimEnv
-# from experiments.usb_pickup_insertion.wrapper import GripperPenaltyWrapper
+from serl_launcher.wrappers.chunking import ChunkingWrapper
+from experiments.usb_pickup_insertion.wrapper import GripperPenaltyWrapper
 
 
 class TrainConfig(DefaultTrainingConfig):
-    image_keys = ["front"]
-    classifier_keys = ["front"]
+    image_keys = ["front", "wrist"]
+    classifier_keys = ["front", "wrist"]
     proprio_keys = ['panda/tcp_pos', 'panda/tcp_vel', 'panda/gripper_pos']
     # buffer_period = 1000
     # checkpoint_period = 5000
@@ -44,4 +46,7 @@ class TrainConfig(DefaultTrainingConfig):
         env = FrankaSimEnv(env, action_scale=[0.1, 0.1, 0.1])
         env = SERLObsWrapper(env, proprio_keys=self.proprio_keys)
         env = SimSpacemouseIntervention(env)
+        env = ChunkingWrapper(env, obs_horizon=1, act_exec_horizon=None)
+        env = GripperPenaltyWrapper(env, penalty=-0.02)
+        
         return env
