@@ -39,8 +39,9 @@ class ImageDisplayer(threading.Thread):
             if img_array is None:  # None is our signal to exit
                 break
 
+            assert isinstance(img_array, dict)
             frame = np.concatenate(
-                [cv2.resize(v, (128, 128)) for k, v in img_array.items() if "full" not in k], axis=1
+                [cv2.resize(v, (512, 512)) for k, v in img_array.items() if "full" not in k], axis=1
             )
 
             cv2.imshow(self.name, frame)
@@ -165,13 +166,17 @@ class PandaPickCubeGymEnv(MujocoGymEnv):
         # is possible to add a similar viewer feature with gym, but that can be a future TODO
         from gymnasium.envs.mujoco.mujoco_rendering import MujocoRenderer
 
+        self.model.vis.global_.offwidth = 256
+        self.model.vis.global_.offheight = 256
         self._viewer = MujocoRenderer(
             self.model,
             self.data,
-            # width=84,
-            # height=84,
         )
         self._viewer.render(self.render_mode)
+
+        self.img_queue = queue.Queue()
+        self.displayer = ImageDisplayer(self.img_queue, "http://127.0.0.1:5000/")
+        self.displayer.start()
 
     def reset(
         self, seed=None, **kwargs
@@ -251,10 +256,12 @@ class PandaPickCubeGymEnv(MujocoGymEnv):
 
     def render(self):
         rendered_frames = []
+        rendered_frames_dict = {}
         for cam_id in self.camera_id:
-            rendered_frames.append(
-                self._viewer.render(render_mode="rgb_array")
-            )
+            img = self._viewer.render(render_mode="rgb_array", camera_id=cam_id)
+            rendered_frames.append(img)
+            rendered_frames_dict[str(cam_id)] = img
+        self.img_queue.put(rendered_frames_dict)
         return rendered_frames
 
     # Helper methods.
@@ -317,6 +324,12 @@ class PandaPickCubeGymEnv(MujocoGymEnv):
     def _compute_success(self) -> bool:
         block_pos = self._data.sensor("block_pos").data
         return block_pos[2] > self._z_success
+    
+    def close(self):
+        super().close()
+        self.img_queue.put(None)
+        cv2.destroyAllWindows()
+        self.displayer.join()
 
 
 if __name__ == "__main__":
