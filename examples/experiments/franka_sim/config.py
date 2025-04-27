@@ -6,6 +6,7 @@ import numpy as np
 from franka_env.envs.wrappers import (
     SimSpacemouseIntervention,
     Quat2EulerWrapper,
+    Useless4To7Wrapper,
 )
 from serl_launcher.wrappers.serl_obs_wrappers import SERLObsWrapper
 
@@ -47,6 +48,7 @@ class TrainConfig(DefaultTrainingConfig):
         env = SERLObsWrapper(env, proprio_keys=self.proprio_keys)
         env = SimSpacemouseIntervention(env)
         env = ChunkingWrapper(env, obs_horizon=1, act_exec_horizon=None)
+        env = Useless4To7Wrapper(env)
         env = GripperPenaltyWrapper(env, penalty=-0.02)
         
         return env

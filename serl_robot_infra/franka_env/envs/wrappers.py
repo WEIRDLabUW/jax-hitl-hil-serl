@@ -470,3 +470,27 @@ class LastNGripperActionsWrapper(gym.ObservationWrapper):
         assert isinstance(obs, dict) and 'state' in obs
         obs['state'] = np.concatenate([obs['state'], np.array(self.past_gripper_actions)], axis=-1)
         return obs, reward, terminated, truncated, info
+
+
+class Useless4To7Wrapper(gym.ActionWrapper):
+    def __init__(self, env: gym.Env):
+        super().__init__(env)
+        assert isinstance(env.action_space, gym.spaces.Box)
+        assert env.action_space.shape == (4,)
+        low = self.reverse_action(env.action_space.low)
+        high = self.reverse_action(env.action_space.high)
+        self.action_space = Box(low=low, high=high)
+    
+    def reverse_action(self, action: np.ndarray):
+        assert action.shape == (4,), f"{action.shape}"
+        return np.concatenate([action[:3], np.zeros((3,)), action[3:]], axis=0)
+    
+    def action(self, action: np.ndarray):
+        assert action.shape == (7,), f"{action.shape}"
+        return np.concatenate([action[:3], action[6:]], axis=0)
+
+    def step(self, action: np.ndarray):
+        next_obs, rew, done, truncated, info = self.env.step(self.action(action))
+        if 'intervene_action' in info:
+            info['intervene_action'] = self.reverse_action(info['intervene_action'])
+        return next_obs, rew, done, truncated, info

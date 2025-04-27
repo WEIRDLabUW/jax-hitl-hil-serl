@@ -726,7 +726,10 @@ def main(_):
                     for k in set(transition['observations'].keys()) - set(config.image_keys + ['state']):
                         del transition['observations'][k]
                     for k in config.image_keys:
-                        transition['observations'][k] = cv2.resize(transition['observations'][k], (128, 128))
+                        img = transition['observations'][k]
+                        if img.ndim == 4 and img.shape[0] == 1:
+                            img = img[0]
+                        transition['observations'][k] = cv2.resize(img, (128, 128))
                     if 'infos' in transition and 'grasp_penalty' in transition['infos']:
                         transition['grasp_penalty'] = transition['infos']['grasp_penalty']
                     assert transition['rewards'] < 1 + 1e-6 and transition['rewards'] > -1e-6, f"{transition['rewards']}"
