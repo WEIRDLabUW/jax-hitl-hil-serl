@@ -40,7 +40,7 @@ from experiments.mappings import CONFIG_MAPPING
 FLAGS = flags.FLAGS
 
 flags.DEFINE_string("exp_name", None, "Name of experiment corresponding to folder.")
-flags.DEFINE_string("method", "rlif", "valid values: rlif, cl, hil")
+flags.DEFINE_string("method", "rlif", "valid values: rlif, cl, hil, soft_cl")
 flags.DEFINE_integer("seed", 42, "Random seed.")
 flags.DEFINE_boolean("learner", False, "Whether this is a learner.")
 flags.DEFINE_boolean("actor", False, "Whether this is an actor.")
@@ -51,6 +51,8 @@ flags.DEFINE_integer("eval_checkpoint_step", 0, "Step to evaluate the checkpoint
 flags.DEFINE_integer("eval_n_trajs", 0, "Number of trajectories to evaluate.")
 flags.DEFINE_boolean("save_video", False, "Save video.")
 
+flags.DEFINE_float("optimism", 0.0, "Whether or not to add a small amount of bonus to the post-state of interventions.")
+flags.DEFINE_boolean("optimism_done_mask", False, "The done to be set for the optimism transition.")
 flags.DEFINE_boolean(
     "debug", False, "Debug mode."
 )  # debug mode will disable wandb logging
@@ -66,6 +68,9 @@ def print_green(x):
 
 def print_yellow(x):
     return print("\033[93m {}\033[00m".format(x))
+
+def print_cyan(x):
+    return print("\033[96m {}\033[00m".format(x))
 
 
 ##############################################################################
@@ -125,6 +130,7 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng, pref_data_stor
             ### receive signal from learner and then reset
             obs, _ = env.reset()
             time.sleep(7.0)
+            obs, _ = env.reset()
             print("reset end")
             done = False
             start_time = time.time()
@@ -200,6 +206,7 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng, pref_data_stor
     print("reset start")
     obs, _ = env.reset()
     time.sleep(5.0)
+    obs, _ = env.reset()
     print("reset end")
     done = False
 
@@ -255,12 +262,14 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng, pref_data_stor
             # override the action with the intervention action
             if "intervene_action" in info:
                 policy_actions = actions
-                actions = info.pop("intervene_action")
+                info["policy_action"] = actions
+                actions = info["intervene_action"]
                 intervention_steps += 1
 
                 post_int_obs = next_obs
 
                 if not already_intervened:
+                    print_cyan("Started intervention.")
                     intervention_count += 1
 
                     pre_int_obs = obs
@@ -289,11 +298,42 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng, pref_data_stor
                 already_intervened = True
             else:
                 if already_intervened:
+                    print_cyan(f"Ended intervention of {this_intervention['t1'] - this_intervention['t0']} steps.")
                     if this_intervention is None:
                         print("Error: Should not be None")
                     interventions.append(this_intervention)
                     this_intervention = None
                     # add to preference buffer
+                    if FLAGS.method != 'rlif':
+                        pref_datapoint = dict(
+                            pre_obs=pre_int_obs,
+                            post_obs=post_int_obs,
+                            a_pi=a_int_pi,
+                            a_exp=a_int_exp,
+                        )
+                        pref_data_store.insert(pref_datapoint)
+                        preference_datas.append(pref_datapoint)
+
+                    if abs(FLAGS.optimism) > 1e-9:
+                        print_cyan(f"Adding optimism transition with reward={FLAGS.optimism} and done={FLAGS.optimism_done_mask}.")
+                        transition = dict(
+                            observations=obs,
+                            actions=actions,
+                            next_observations=next_obs,
+                            rewards=FLAGS.optimism,
+                            masks=1.0 - FLAGS.optimism_done_mask, # Used in training, denoting whether or not we're at the end of a trajectory.
+                            dones=FLAGS.optimism_done_mask, # Not actually used in training.
+                        )
+                        if 'grasp_penalty' in info:
+                            transition['grasp_penalty'] = 0
+                        data_store.insert(transition)
+                        transitions.append(copy.deepcopy(transition) | {'info': info | {'optimism': True}})
+                already_intervened = False
+
+            if (done or truncated) and this_intervention is not None:
+                interventions.append(this_intervention)
+                # add to preference buffer
+                if FLAGS.method != 'rlif':
                     pref_datapoint = dict(
                         pre_obs=pre_int_obs,
                         post_obs=post_int_obs,
@@ -301,20 +341,7 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng, pref_data_stor
                         a_exp=a_int_exp,
                     )
                     pref_data_store.insert(pref_datapoint)
-                    preference_datas.append(pref_datapoint)
-                already_intervened = False
-
-            if (done or truncated) and this_intervention is not None:
-                interventions.append(this_intervention)
-                # add to preference buffer
-                pref_datapoint = dict(
-                    pre_obs=pre_int_obs,
-                    post_obs=post_int_obs,
-                    a_pi=a_int_pi,
-                    a_exp=a_int_exp,
-                )
-                pref_data_store.insert(pref_datapoint)
-                this_intervention = None
+                    this_intervention = None
 
             running_return += reward
             transition = dict(
@@ -330,10 +357,10 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng, pref_data_stor
             if 'grasp_penalty' in info:
                 transition['grasp_penalty']= info['grasp_penalty']
             data_store.insert(transition)
-            transitions.append(copy.deepcopy(transition))
+            transitions.append(copy.deepcopy(transition) | {'info': info})
             if already_intervened:
                 intvn_data_store.insert(transition)
-                demo_transitions.append(copy.deepcopy(transition))
+                demo_transitions.append(copy.deepcopy(transition) | {'info': info})
 
             obs = next_obs
             if done or truncated:
@@ -368,6 +395,7 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng, pref_data_stor
                 demo_transitions_full_trajs = demo_transitions
                 # input("Waiting for input to proceed...")
                 time.sleep(7.0)
+                obs, _ = env.reset()
                 print("reset end")
                 from_time = time.time()
 
@@ -439,9 +467,11 @@ def learner(rng, agent, replay_buffer, demo_buffer, preference_buffer = None, wa
         train_critic_networks_to_update = frozenset({"critic", "grasp_critic"})
         train_networks_to_update = frozenset({"critic", "grasp_critic", "actor", "temperature"})
 
-    if FLAGS.method == "cl" and "log_alpha_state" in agent.state.params:
-        train_critic_networks_to_update = frozenset(train_critic_networks_to_update | {"log_alpha_state"})
-        train_networks_to_update = frozenset(train_networks_to_update | {"log_alpha_state"})
+    if FLAGS.method == "cl" and FLAGS.method != "soft_cl":
+        assert "modules_log_alpha_state" in agent.state.params
+        assert "modules_log_alpha_gripper_state" in agent.state.params
+        train_critic_networks_to_update = frozenset(train_critic_networks_to_update | {"log_alpha_state", "log_alpha_grasp_state"})
+        train_networks_to_update = frozenset(train_networks_to_update | {"log_alpha_state", "log_alpha_grasp_state"})
 
 
     def stats_callback(type: str, payload: dict) -> dict:
@@ -506,12 +536,13 @@ def learner(rng, agent, replay_buffer, demo_buffer, preference_buffer = None, wa
         },
         device=sharding.replicate(),
     )
-    preference_iterator = preference_buffer.get_iterator(
-        sample_args={
-            "batch_size": config.batch_size,
-        },
-        device=sharding.replicate(),
-    )
+    if FLAGS.method != 'rlif':
+        preference_iterator = preference_buffer.get_iterator(
+            sample_args={
+                "batch_size": config.batch_size,
+            },
+            device=sharding.replicate(),
+        )
 
     # wait till the replay buffer is filled with enough data
     timer = Timer()
@@ -600,7 +631,7 @@ def learner(rng, agent, replay_buffer, demo_buffer, preference_buffer = None, wa
 def main(_):
     global config
     config = CONFIG_MAPPING[FLAGS.exp_name]()
-    enable_cl = FLAGS.method == "cl"
+    enable_cl = FLAGS.method in ["cl", "soft_cl"]
 
     if config.rlif_minus_one:
         print_green("Using RLIF.")
@@ -644,6 +675,7 @@ def main(_):
             encoder_type=config.encoder_type,
             discount=config.discount,
             enable_cl=enable_cl,
+            soft_cl = FLAGS.method == "soft_cl",
             intervene_steps=intervene_steps,
             constraint_eps=constraint_eps,
         )
@@ -696,6 +728,8 @@ def main(_):
         return replay_buffer, wandb_logger
 
     def create_preference_buffer():
+        if FLAGS.method in ["rlif"]:
+            return None
         preference_buffer = PreferenceBufferDataStore(
             env.observation_space,
             env.observation_space,
@@ -739,7 +773,8 @@ def main(_):
         print_green(f"demo buffer size: {len(demo_buffer)}")
         print_green(f"demo count: {num_demos}")
         print_green(f"online buffer size: {len(replay_buffer)}")
-        print_green(f"preference buffer size: {len(preference_buffer)}")
+        if preference_buffer is not None:
+            print_green(f"preference buffer size: {len(preference_buffer)}")
 
         if FLAGS.checkpoint_path is not None and os.path.exists(
             os.path.join(FLAGS.checkpoint_path, "buffer")
@@ -753,7 +788,7 @@ def main(_):
                 f"Loaded previous buffer data. Replay buffer size: {len(replay_buffer)}"
             )
 
-        if FLAGS.checkpoint_path is not None and os.path.exists(
+        if preference_buffer is not None and FLAGS.checkpoint_path is not None and os.path.exists(
             os.path.join(FLAGS.checkpoint_path, "preference_buffer")
         ):
             for file in glob.glob(os.path.join(FLAGS.checkpoint_path, "preference_buffer/*.pkl")):
@@ -795,7 +830,7 @@ def main(_):
         data_store = QueuedDataStore(10000)  # the queue size on the actor
         intvn_data_store = QueuedDataStore(10000)
 
-        if FLAGS.method in ["cl"]:
+        if FLAGS.method in ["cl", "soft_cl"]:
             pref_data_store = QueuedDataStore(10000)
         else:
             pref_data_store = None
