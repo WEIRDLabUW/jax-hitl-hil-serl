@@ -310,6 +310,7 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng, pref_data_stor
                             post_obs=post_int_obs,
                             a_pi=a_int_pi,
                             a_exp=a_int_exp,
+                            t=np.array([this_intervention['t1'] - this_intervention['t0']]),
                         )
                         pref_data_store.insert(pref_datapoint)
                         preference_datas.append(pref_datapoint)
@@ -339,6 +340,7 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng, pref_data_stor
                         post_obs=post_int_obs,
                         a_pi=a_int_pi,
                         a_exp=a_int_exp,
+                        t=np.array([this_intervention['t1'] - this_intervention['t0']]),
                     )
                     pref_data_store.insert(pref_datapoint)
                     this_intervention = None
@@ -664,8 +666,16 @@ def main(_):
         )
         include_grasp_penalty = False
     elif config.setup_mode == 'single-arm-learned-gripper':
-        intervene_steps = 0  # Default number of steps between pre and post intervention states
-        constraint_eps = 0.1  # Default constraint epsilon
+        cl_config = {
+            "enabled": enable_cl,
+            "soft": FLAGS.method == "soft_cl",
+            "enable_margin_constraint": True,
+            "enable_action_constraint": True,
+            "constraint_coeff": 1.0,
+            "constraint_eps": 0.0,
+            "reward_coeff": 1.0,
+        }
+        print_green(f"Using CL Config: {cl_config}")
 
         agent: SACAgentHybridSingleArm = make_sac_pixel_agent_hybrid_single_arm(
             seed=FLAGS.seed,
@@ -675,9 +685,7 @@ def main(_):
             encoder_type=config.encoder_type,
             discount=config.discount,
             enable_cl=enable_cl,
-            soft_cl = FLAGS.method == "soft_cl",
-            intervene_steps=intervene_steps,
-            constraint_eps=constraint_eps,
+            cl_config=cl_config,
         )
         include_grasp_penalty = True
     elif config.setup_mode == 'dual-arm-learned-gripper':

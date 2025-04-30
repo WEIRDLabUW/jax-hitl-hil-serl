@@ -256,20 +256,20 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
         }
 
         if pref_batch is not None and "cl" in self.config and self.config["cl"]["enabled"]:
-            rng, state_key = jax.random.split(rng)
+            rngs = jax.random.split(rng, 7)
+            rng = rngs[0]
 
             # Get Q-values for pre-intervention states
             o_pre = pref_batch["pre_obs"]
             o_post = pref_batch["post_obs"]
 
             # Get actions for pre and post states
-            a_pre = self.forward_policy(o_pre, rng=state_key).sample(seed=state_key)
-            rng, post_key = jax.random.split(rng)
-            a_post = self.forward_policy(o_post, rng=post_key).sample(seed=post_key)
+            a_pre = self.forward_policy(o_pre, rng=rngs[1]).sample(seed=rngs[2])
+            a_post = self.forward_policy(o_post, rng=rngs[3]).sample(seed=rngs[4])
 
             # Get Q-values for pre and post states
-            o_pre_qf = self.forward_critic(o_pre, a_pre, rng=state_key, grad_params=params)
-            o_post_qf = self.forward_critic(o_post, a_post, rng=post_key, grad_params=params)
+            o_pre_qf = self.forward_critic(o_pre, a_pre, rng=rngs[5], grad_params=params)
+            o_post_qf = self.forward_critic(o_post, a_post, rng=rngs[6], grad_params=params)
 
             if not self.config["cl"]["soft"]:
                 # Apply CL constraint: constraint satisfied if o_pre_qf * constraint_coeff - o_post_qf <= constraint_eps * max(abs(o_pre_qf), abs(o_post_qf))
@@ -301,10 +301,10 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
             else:
                 constraint_coeff = self.config["cl"]["constraint_coeff"]
                 reward_coeff = self.config["cl"]["reward_coeff"]
-
-                state_loss = reward_coeff * (constraint_coeff * o_pre_qf - o_post_qf)
-                state_loss = jnp.where(state_loss < 0, 0.0, state_loss).mean()
-                critic_loss += state_loss
+                
+                # Q(o_pre, pi(o_pre)) <= Q(o_post, pi(o_post))
+                state_losses = reward_coeff * (o_pre_qf - o_post_qf)
+                state_loss = jnp.where(state_losses < 0, 0.0, state_losses).mean()
 
                 info = info | {
                     "state_loss": state_loss,
@@ -312,8 +312,45 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
                     "reward_coeff": reward_coeff,
                     "pre_qf": o_pre_qf.mean(),
                     "post_qf": o_post_qf.mean(),
-                    "percentage_satisfied": jnp.where(state_loss < 0, 1.0, 0.0).mean(),
+                    "state_loss_percentage_satisfied": jnp.where(state_losses < 0, 1.0, 0.0).mean(),
+                    "pre_qf_percentage_negative": jnp.where(o_pre_qf < 0, 1.0, 0.0).mean(),
+                    "post_qf_percentage_negative": jnp.where(o_post_qf < 0, 1.0, 0.0).mean(),
                 }
+
+                # Q(o_pre, pi(o_pre)) >= gamma ** t * Q(o_post, pi(o_post))
+                if self.config["cl"]["enable_margin_constraint"]:
+                    coeff = jnp.power(self.config['discount'], pref_batch["t"])
+                    margin_losses = reward_coeff * (jnp.multiply(coeff, o_post_qf) - o_pre_qf)
+                    margin_loss = jnp.where(margin_losses < 0, 0.0, margin_losses).mean()
+                    state_loss += margin_loss
+
+                    info = info | {
+                        "margin_loss": margin_loss,
+                        "coeff": coeff.mean(),
+                        "discount": self.config['discount'],
+                        "t": pref_batch["t"].mean(),
+                        "margin_loss_percentage_satisfied": jnp.where(margin_losses < 0, 1.0, 0.0).mean(),
+                    }
+                critic_loss += state_loss
+
+                # Q(o_pre, a_pi) <= Q(o_pre, a_exp)
+                if self.config["cl"]["enable_action_constraint"]:
+                    a_pi = pref_batch['a_pi']
+                    a_ex = pref_batch['a_exp']
+                    
+                    rng, o_pre_a_pi_qf_key, o_pre_a_ex_qf_key = jax.random.split(rng, 3)
+                    o_pre_a_pi_qf = self.forward_critic(o_pre, a_pi, rng=o_pre_a_pi_qf_key, grad_params=params)
+                    o_pre_a_ex_qf = self.forward_critic(o_pre, a_ex, rng=o_pre_a_ex_qf_key, grad_params=params)
+                    action_losses = reward_coeff * (o_pre_a_pi_qf - o_pre_a_ex_qf)
+                    action_loss = jnp.where(action_losses < 0, 0.0, action_losses).mean()
+
+                    info = info | {
+                        "action_loss": action_loss,
+                        "o_pre_a_pi_qf": o_pre_a_pi_qf.mean(),
+                        "o_pre_a_ex_qf": o_pre_a_ex_qf.mean(),
+                        "action_loss_percentage_satisfied": jnp.where(action_losses < 0, 1.0, 0.0).mean(),
+                    }
+                    critic_loss += action_loss
 
         return critic_loss, info
 
@@ -380,12 +417,10 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
             o_pre = pref_batch["pre_obs"]
             o_post = pref_batch["post_obs"]
 
-            pre_grasp_qs = self.forward_grasp_critic(o_pre, rng=state_key, grad_params=params)
             rng, post_key = jax.random.split(rng)
-            post_grasp_qs = self.forward_grasp_critic(o_post, rng=post_key, grad_params=params)
 
-            pre_grasp_q = pre_grasp_qs.max(axis=-1)
-            post_grasp_q = post_grasp_qs.max(axis=-1)
+            o_pre_qf = self.forward_grasp_critic(o_pre, rng=state_key, grad_params=params).max(axis=-1)
+            o_post_qf = self.forward_grasp_critic(o_post, rng=post_key, grad_params=params).max(axis=-1)
 
             if not self.config["cl"]["soft"]:
                 # constraint satisfied if pre_grasp_q * constraint_coeff - post_grasp_q <= constraint_eps * max(abs(pre_grasp_q), abs(post_grasp_q))
@@ -393,9 +428,9 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
                 constraint_eps = self.config["cl"]["constraint_eps"]
 
                 qf_diff = jnp.where(
-                    constraint_coeff * pre_grasp_q - post_grasp_q <= constraint_eps * jnp.maximum(jnp.abs(pre_grasp_q), jnp.abs(post_grasp_q)),
+                    constraint_coeff * o_pre_qf - o_post_qf <= constraint_eps * jnp.maximum(jnp.abs(o_pre_qf), jnp.abs(o_post_qf)),
                     0.0,
-                    constraint_coeff * pre_grasp_q - post_grasp_q
+                    constraint_coeff * o_pre_qf - o_post_qf
                 )
 
                 log_alpha_gripper_state = self.forward_log_alpha_gripper(o_pre, o_post)
@@ -411,19 +446,61 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
             else:
                 constraint_coeff = self.config["cl"]["constraint_coeff"]
                 reward_coeff = self.config["cl"]["reward_coeff"]
-
-                state_loss = reward_coeff * (constraint_coeff * pre_grasp_q - post_grasp_q)
-                state_loss = jnp.where(state_loss < 0, 0.0, state_loss).mean()
-                grasp_critic_loss += state_loss
+                
+                # Q(o_pre, pi(o_pre)) <= Q(o_post, pi(o_post))
+                state_losses = reward_coeff * (o_pre_qf - o_post_qf)
+                state_loss = jnp.where(state_losses < 0, 0.0, state_losses).mean()
 
                 info = info | {
                     "state_loss": state_loss,
                     "constraint_coeff": constraint_coeff,
                     "reward_coeff": reward_coeff,
-                    "pre_qf": pre_grasp_q.mean(),
-                    "post_qf": post_grasp_q.mean(),
-                    "percentage_satisfied": jnp.where(state_loss < 0, 1.0, 0.0).mean(),
+                    "pre_qf": o_pre_qf.mean(),
+                    "post_qf": o_post_qf.mean(),
+                    "state_loss_percentage_satisfied": jnp.where(state_losses < 0, 1.0, 0.0).mean(),
+                    "pre_qf_percentage_negative": jnp.where(o_pre_qf < 0, 1.0, 0.0).mean(),
+                    "post_qf_percentage_negative": jnp.where(o_post_qf < 0, 1.0, 0.0).mean(),
                 }
+
+                # Q(o_pre, pi(o_pre)) >= gamma ** t * Q(o_post, pi(o_post))
+                if self.config["cl"]["enable_margin_constraint"]:
+                    coeff = jnp.power(self.config['discount'], pref_batch["t"])
+                    margin_losses = reward_coeff * (jnp.multiply(coeff, o_post_qf) - o_pre_qf)
+                    margin_loss = jnp.where(margin_losses < 0, 0.0, margin_losses).mean()
+                    state_loss += margin_loss
+
+                    info = info | {
+                        "margin_loss": margin_loss,
+                        "coeff": coeff.mean(),
+                        "discount": self.config['discount'],
+                        "t": pref_batch["t"].mean(),
+                        "margin_loss_percentage_satisfied": jnp.where(margin_losses < 0, 1.0, 0.0).mean(),
+                    }
+                critic_loss += state_loss
+
+                # Q(o_pre, a_pi) <= Q(o_pre, a_exp)
+                if self.config["cl"]["enable_action_constraint"]:
+                    chex.assert_shape(pref_batch['a_pi'], (batch_size, None))
+                    chex.assert_shape(pref_batch['a_exp'], (batch_size, None))
+                    a_pi = pref_batch['a_pi'][:,-1]
+                    a_ex = pref_batch['a_exp'][:,-1]
+                    
+                    rng, o_pre_a_pi_qf_key, o_pre_a_ex_qf_key = jax.random.split(rng, 3)
+                    o_pre_a_pi_qf = self.forward_grasp_critic(o_pre, rng=o_pre_a_pi_qf_key, grad_params=params)[jnp.arange(batch_size), a_pi]
+                    chex.assert_shape(o_pre_a_pi_qf, (batch_size,))
+                    o_pre_a_ex_qf = self.forward_critic(o_pre, rng=o_pre_a_ex_qf_key, grad_params=params)[jnp.arange(batch_size), a_ex]
+                    chex.assert_shape(o_pre_a_pi_qf, (batch_size,))
+
+                    action_losses = reward_coeff * (o_pre_a_pi_qf - o_pre_a_ex_qf)
+                    action_loss = jnp.where(action_losses < 0, 0.0, action_losses).mean()
+
+                    info = info | {
+                        "action_loss": action_loss,
+                        "o_pre_a_pi_qf": o_pre_a_pi_qf.mean(),
+                        "o_pre_a_ex_qf": o_pre_a_ex_qf.mean(),
+                        "action_loss_percentage_satisfied": jnp.where(action_losses < 0, 1.0, 0.0).mean(),
+                    }
+                    critic_loss += action_loss
 
         return grasp_critic_loss, info
 
@@ -817,20 +894,10 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
 
         # Add CL configuration if log_alpha_state is provided
         if log_alpha_state_def is not None:
-            # Default CL configuration
-            cl_config = {
-                "enabled": True,
-                "soft": True,
-                "constraint_eps": 0.1,
-                "constraint_coeff": discount**kwargs.get("intervene_steps", 0),
-                "reward_coeff": 1.0,
-            }
             # Update with any user-provided CL settings
             assert "cl" in kwargs
-            assert "soft" in kwargs["cl"]
-            if "cl" in kwargs:
-                cl_config.update(kwargs["cl"])
-            config_dict["cl"] = cl_config
+            assert set(["enabled", "soft", "soft_margin", "constraint_eps", "reward_coeff", "constraint_coeff"]).issubset(set(kwargs["cl"].keys()))
+            config_dict["cl"] = kwargs["cl"]
 
         return cls(
             state=state,

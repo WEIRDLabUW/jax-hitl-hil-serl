@@ -152,13 +152,8 @@ def make_sac_pixel_agent_hybrid_single_arm(
     target_entropy=None,
     discount=0.97,
     enable_cl=False,
-    soft_cl=None,
-    intervene_steps=0,
-    constraint_eps=0.1,
+    cl_config: dict = {},
 ):
-    if enable_cl:
-        assert soft_cl is not None and isinstance(soft_cl, bool)
-    
     agent = SACAgentHybridSingleArm.create_pixels(
         jax.random.PRNGKey(seed),
         sample_obs,
@@ -201,14 +196,7 @@ def make_sac_pixel_agent_hybrid_single_arm(
         target_entropy=target_entropy,
         augmentation_function=make_batch_augmentation_func(image_keys),
         enable_cl=enable_cl,
-        intervene_steps=intervene_steps,
-        cl={
-            "enabled": enable_cl,
-            "soft": soft_cl,
-            "constraint_eps": constraint_eps,
-            "constraint_coeff": discount**intervene_steps,
-            "reward_coeff": 1.0,
-        }
+        cl=cl_config
     )
     return agent
 
