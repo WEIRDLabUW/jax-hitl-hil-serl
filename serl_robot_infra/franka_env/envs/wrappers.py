@@ -8,7 +8,8 @@ from franka_env.spacemouse.spacemouse_expert import SpaceMouseExpert
 import requests
 from scipy.spatial.transform import Rotation as R
 from franka_env.envs.franka_env import FrankaEnv
-from typing import List
+from typing import List, Tuple
+import cv2
 
 sigmoid = lambda x: 1 / (1 + np.exp(-x))
 
@@ -500,3 +501,29 @@ class Useless4To7Wrapper(gym.ActionWrapper):
         if 'intervene_action' in info:
             info['intervene_action'] = self.reverse_action(info['intervene_action'])
         return next_obs, rew, done, truncated, info
+
+
+class BruhImageResizingWrapper(gym.ObservationWrapper):
+    def __init__(self, env: gym.Env, target_image_dims: Tuple[int, int]):
+        assert isinstance(target_image_dims, tuple) and len(target_image_dims) == 2
+        super().__init__(env)
+        self.target_image_dims = target_image_dims
+        self.img_keys = []
+        for k in set(self.observation_space.keys()) - set(['state']):
+            self.img_keys.append(k)
+            if len(self.observation_space[k].shape) == 3:
+                self.observation_space[k] = Box(low=0, high=255, shape=(*self.target_image_dims, 3), dtype=np.uint8)
+            elif len(self.observation_space[k].shape) == 4 and self.observation_space[k].shape[0] == 1:
+                self.observation_space[k] = Box(low=0, high=255, shape=(1, *self.target_image_dims, 3), dtype=np.uint8)
+            else:
+                raise Exception(f"{self.observation_space[k].shape}")
+    
+    def observation(self, observation):
+        for k in self.img_keys:
+            if observation[k].ndim == 3:
+                observation[k] = cv2.resize(observation[k], self.target_image_dims)
+            elif observation[k].ndim == 4 and observation[k].shape[0] == 1:
+                observation[k] = cv2.resize(observation[k][0], self.target_image_dims)[None]
+            else:
+                raise Exception(f"{observation[k].shape}")
+        return observation

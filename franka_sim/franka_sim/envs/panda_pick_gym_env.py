@@ -61,8 +61,11 @@ class PandaPickCubeGymEnv(MujocoGymEnv):
         render_spec: GymRenderingSpec = GymRenderingSpec(),
         render_mode: Literal["rgb_array", "human"] = "rgb_array",
         image_obs: bool = False,
+        show_viewer: bool = False,
     ):
         self._action_scale = action_scale
+        self.render_spec = render_spec
+        self.show_viewer = show_viewer
 
         super().__init__(
             xml_path=_XML_PATH,
@@ -166,17 +169,18 @@ class PandaPickCubeGymEnv(MujocoGymEnv):
         # is possible to add a similar viewer feature with gym, but that can be a future TODO
         from gymnasium.envs.mujoco.mujoco_rendering import MujocoRenderer
 
-        self.model.vis.global_.offwidth = 128
-        self.model.vis.global_.offheight = 128
+        self.model.vis.global_.offwidth = self.render_spec.width
+        self.model.vis.global_.offheight = self.render_spec.height
         self._viewer = MujocoRenderer(
             self.model,
             self.data,
         )
         self._viewer.render(self.render_mode)
-
-        self.img_queue = queue.Queue()
-        self.displayer = ImageDisplayer(self.img_queue, "http://127.0.0.1:5000/")
-        self.displayer.start()
+        
+        if self.show_viewer:
+            self.img_queue = queue.Queue()
+            self.displayer = ImageDisplayer(self.img_queue, "http://127.0.0.1:5000/")
+            self.displayer.start()
 
     def reset(
         self, seed=None, **kwargs
@@ -261,7 +265,8 @@ class PandaPickCubeGymEnv(MujocoGymEnv):
             img = self._viewer.render(render_mode="rgb_array", camera_id=cam_id)
             rendered_frames.append(img)
             rendered_frames_dict[str(cam_id)] = img
-        self.img_queue.put(rendered_frames_dict)
+        if self.show_viewer:
+            self.img_queue.put(rendered_frames_dict)
         return rendered_frames
 
     # Helper methods.
@@ -327,9 +332,10 @@ class PandaPickCubeGymEnv(MujocoGymEnv):
     
     def close(self):
         super().close()
-        self.img_queue.put(None)
-        cv2.destroyAllWindows()
-        self.displayer.join()
+        if self.show_viewer:
+            self.img_queue.put(None)
+            cv2.destroyAllWindows()
+            self.displayer.join()
 
 
 if __name__ == "__main__":
