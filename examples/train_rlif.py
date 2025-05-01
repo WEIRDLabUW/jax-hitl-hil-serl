@@ -435,6 +435,15 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng, pref_data_stor
                 print(f"Dumping {len(preference_datas)} interventions to {fp}")
                 pkl.dump(preference_datas, f)
                 preference_datas = []
+        
+        if (
+            step > 0
+            and config.checkpoint_period
+            and step % config.checkpoint_period == 0
+        ):
+            checkpoints.save_checkpoint(
+                os.path.abspath(FLAGS.checkpoint_path), agent.state, step=step, keep=100
+            )
 
         timer.tock("total")
 
@@ -612,15 +621,6 @@ def learner(rng, agent, replay_buffer, demo_buffer, preference_buffer = None, wa
         if step % config.log_period == 0 and wandb_logger:
             wandb_logger.log(update_info, step=step + config.pretraining_steps)
             wandb_logger.log({"timer": timer.get_average_times()}, step=step + config.pretraining_steps)
-
-        if (
-            step > 0
-            and config.checkpoint_period
-            and step % config.checkpoint_period == 0
-        ):
-            checkpoints.save_checkpoint(
-                os.path.abspath(FLAGS.checkpoint_path), agent.state, step=step, keep=100
-            )
 
 
 ##############################################################################
