@@ -129,8 +129,6 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng, pref_data_stor
             print("reset start")
             ### receive signal from learner and then reset
             obs, _ = env.reset()
-            time.sleep(7.0)
-            obs, _ = env.reset()
             print("reset end")
             done = False
             start_time = time.time()
@@ -205,8 +203,7 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng, pref_data_stor
 
     print("reset start")
     obs, _ = env.reset()
-    time.sleep(5.0)
-    obs, _ = env.reset()
+    time.sleep(1.0)
     print("reset end")
     done = False
 
@@ -394,7 +391,7 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng, pref_data_stor
                 transitions_full_trajs = transitions
                 demo_transitions_full_trajs = demo_transitions
                 # input("Waiting for input to proceed...")
-                time.sleep(7.0)
+                time.sleep(1.0)
                 obs, _ = env.reset()
                 print("reset end")
                 from_time = time.time()
@@ -766,13 +763,19 @@ def main(_):
                 for transition in transitions:
                     for k in set(transition['observations'].keys()) - set(config.image_keys + ['state']):
                         del transition['observations'][k]
+                        del transition['next_observations'][k]
                     for k in config.image_keys:
                         img = transition['observations'][k]
                         if img.ndim == 4 and img.shape[0] == 1:
                             img = img[0]
                         transition['observations'][k] = cv2.resize(img, (128, 128))
-                    if 'infos' in transition and 'grasp_penalty' in transition['infos']:
-                        transition['grasp_penalty'] = transition['infos']['grasp_penalty']
+                        img = transition['next_observations'][k]
+                        if img.ndim == 4 and img.shape[0] == 1:
+                            img = img[0]
+                        transition['next_observations'][k] = cv2.resize(img, (128, 128))
+                    if transition['actions'].shape == (4,):
+                        transition['actions'] = np.concatenate([transition['actions'][:3], np.zeros((3,)), transition['actions'][3:]], axis=0)
+                    transition['grasp_penalty'] = 0
                     assert transition['rewards'] < 1 + 1e-6 and transition['rewards'] > -1e-6, f"{transition['rewards']}"
                     num_demos += transition['rewards']
                     transition['rewards'] *= config.reward_scale
