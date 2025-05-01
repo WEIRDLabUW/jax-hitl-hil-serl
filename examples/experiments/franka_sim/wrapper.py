@@ -6,22 +6,29 @@ import numpy as np
 import requests
 from pynput import keyboard
 import gymnasium as gym
+from franka_sim.mujoco_gym_env import MujocoGymEnv
 
 import mujoco
 import mujoco.viewer
 
 
 class FrankaSimEnv(gym.Wrapper):
+    show_viewer: bool
+
     def __init__(
             self,
             env,
-            action_scale: list = [1, 1, 1]
+            action_scale: list,
+            show_viewer: bool = True,
         ):
+        assert isinstance(env, MujocoGymEnv)
         super().__init__(env)
         m = env.model
         d = env.data
         self.action_scale = np.array(action_scale)
-        self.viewer = mujoco.viewer.launch_passive(m, d)
+        self.show_viewer = show_viewer
+        if self.show_viewer:
+            self.viewer = mujoco.viewer.launch_passive(m, d)
 
     def reset(self, *args, **kwargs):
         return super().reset(*args, **kwargs)
@@ -32,7 +39,8 @@ class FrankaSimEnv(gym.Wrapper):
         action[:3] *= self.action_scale
         step_start = time.time()
         vals = super().step(action)
-        self.viewer.sync()
+        if self.show_viewer:
+            self.viewer.sync()
         time_until_next_step = self.env.control_dt - (time.time() - step_start)
         if time_until_next_step > 0:
             time.sleep(time_until_next_step)

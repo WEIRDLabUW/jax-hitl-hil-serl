@@ -687,7 +687,7 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
         # Only compute gradients for specified steps
         assert networks_to_update.issubset(
             loss_fns.keys()
-        ), f"Invalid gradient steps: {networks_to_update}"
+        ), f"{networks_to_update} not within {loss_fns.keys()}"
         if self.config["cl"]["enabled"] and self.config["cl"]["soft"]:
             assert "log_alpha_state" not in networks_to_update
             assert "log_alpha_gripper_state" not in networks_to_update
@@ -896,7 +896,7 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
         if log_alpha_state_def is not None:
             # Update with any user-provided CL settings
             assert "cl" in kwargs
-            assert set(["enabled", "soft", "soft_margin", "constraint_eps", "reward_coeff", "constraint_coeff"]).issubset(set(kwargs["cl"].keys()))
+            assert set(["enabled", "soft", "enable_margin_constraint", "enable_action_constraint", "constraint_eps", "reward_coeff", "constraint_coeff"]).issubset(set(kwargs["cl"].keys()))
             config_dict["cl"] = kwargs["cl"]
 
         return cls(
