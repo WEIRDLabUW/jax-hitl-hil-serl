@@ -343,6 +343,7 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng, pref_data_stor
                         t=np.array([this_intervention['t1'] - this_intervention['t0']]),
                     )
                     pref_data_store.insert(pref_datapoint)
+                    preference_datas.append(pref_datapoint)
                     this_intervention = None
 
             running_return += reward
@@ -360,9 +361,6 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng, pref_data_stor
                 transition['grasp_penalty']= info['grasp_penalty']
             data_store.insert(transition)
             transitions.append(copy.deepcopy(transition) | {'info': info})
-            if already_intervened:
-                intvn_data_store.insert(transition)
-                demo_transitions.append(copy.deepcopy(transition) | {'info': info})
 
             obs = next_obs
             if done or truncated:
@@ -417,18 +415,19 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng, pref_data_stor
                 os.makedirs(preference_buffer_path)
             with open(os.path.join(buffer_path, f"transitions_{step}.pkl"), "wb") as f:
                 fp = os.path.join(buffer_path, f"transitions_{step}.pkl")
-                print(f"Dumping {len(transitions_full_trajs)} expert transitions out of {len(transitions)} to {fp} !!!")
+                print(f"Dumping {len(transitions_full_trajs)} transitions out of {len(transitions)} to {fp} !!!")
                 pkl.dump(transitions_full_trajs, f)
                 transitions = transitions[len(transitions_full_trajs):]
                 transitions_full_trajs = []
-            with open(
-                os.path.join(demo_buffer_path, f"transitions_{step}.pkl"), "wb"
-            ) as f:
-                fp = os.path.join(demo_buffer_path, f"transitions_{step}.pkl")
-                print(f"Dumping {len(demo_transitions_full_trajs)} expert transitions out of {len(demo_transitions)} to {fp} !!!")
-                pkl.dump(demo_transitions_full_trajs, f)
-                demo_transitions = demo_transitions[len(demo_transitions_full_trajs):]
-                demo_transitions_full_trajs = []
+            # Commented out because offline buffer = demos.
+            # with open(
+            #     os.path.join(demo_buffer_path, f"transitions_{step}.pkl"), "wb"
+            # ) as f:
+            #     fp = os.path.join(demo_buffer_path, f"transitions_{step}.pkl")
+            #     print(f"Dumping {len(demo_transitions_full_trajs)} expert transitions out of {len(demo_transitions)} to {fp} !!!")
+            #     pkl.dump(demo_transitions_full_trajs, f)
+            #     demo_transitions = demo_transitions[len(demo_transitions_full_trajs):]
+            #     demo_transitions_full_trajs = []
             with open(os.path.join(interventions_buffer_path, f"transitions_{step}.pkl"), "wb") as f:
                 fp = os.path.join(interventions_buffer_path, f"transitions_{step}.pkl")
                 print(f"Dumping {len(interventions)} interventions to {fp}")
@@ -472,8 +471,8 @@ def learner(rng, agent, replay_buffer, demo_buffer, preference_buffer = None, wa
     if FLAGS.method == "cl" and FLAGS.method != "soft_cl":
         assert "modules_log_alpha_state" in agent.state.params
         assert "modules_log_alpha_gripper_state" in agent.state.params
-        train_critic_networks_to_update = frozenset(train_critic_networks_to_update | {"log_alpha_state", "log_alpha_grasp_state"})
-        train_networks_to_update = frozenset(train_networks_to_update | {"log_alpha_state", "log_alpha_grasp_state"})
+        train_critic_networks_to_update = frozenset(train_critic_networks_to_update | {"log_alpha_state", "log_alpha_gripper_state"})
+        train_networks_to_update = frozenset(train_networks_to_update | {"log_alpha_state", "log_alpha_gripper_state"})
 
 
     def stats_callback(type: str, payload: dict) -> dict:
