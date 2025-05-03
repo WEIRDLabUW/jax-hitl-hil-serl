@@ -273,8 +273,8 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
 
             if not self.config["cl"]["soft"]:
                 # Apply CL constraint: constraint satisfied if o_pre_qf * constraint_coeff - o_post_qf <= constraint_eps * max(abs(o_pre_qf), abs(o_post_qf))
-                constraint_coeff = self.config["cl"]["constraint_coeff"]
-                constraint_eps = self.config["cl"]["constraint_eps"]
+                constraint_coeff = jnp.array(self.config["cl"]["constraint_coeff"])
+                constraint_eps = jnp.array(self.config["cl"]["constraint_eps"])
 
                 # Calculate violation (if any)
                 qf_diff = jnp.where(
@@ -299,8 +299,8 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
                     "constraint_epsilon": constraint_eps,
                 }
             else:
-                constraint_coeff = self.config["cl"]["constraint_coeff"]
-                reward_coeff = self.config["cl"]["reward_coeff"]
+                constraint_coeff = jnp.array(self.config["cl"]["constraint_coeff"])
+                reward_coeff = jnp.array(self.config["cl"]["reward_coeff"])
                 
                 # Q(o_pre, pi(o_pre)) <= Q(o_post, pi(o_post))
                 state_losses = reward_coeff * (o_pre_qf - o_post_qf)
@@ -327,7 +327,7 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
                     info = info | {
                         "margin_loss": margin_loss,
                         "coeff": coeff.mean(),
-                        "discount": self.config['discount'],
+                        "discount": jnp.array(self.config['discount']),
                         "t": pref_batch["t"].mean(),
                         "margin_loss_percentage_satisfied": jnp.where(margin_losses < 0, 1.0, 0.0).mean(),
                     }
@@ -335,8 +335,8 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
 
                 # Q(o_pre, a_pi) <= Q(o_pre, a_exp)
                 if self.config["cl"]["enable_action_constraint"]:
-                    a_pi = pref_batch['a_pi']
-                    a_ex = pref_batch['a_exp']
+                    a_pi = pref_batch['a_pi'][:,:6]
+                    a_ex = pref_batch['a_exp'][:,:6]
                     
                     rng, o_pre_a_pi_qf_key, o_pre_a_ex_qf_key = jax.random.split(rng, 3)
                     o_pre_a_pi_qf = self.forward_critic(o_pre, a_pi, rng=o_pre_a_pi_qf_key, grad_params=params)
@@ -402,10 +402,10 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
 
         # Compute MSE loss between predicted and target Q-values
         chex.assert_equal_shape([predicted_grasp_q, target_grasp_q])
-        grasp_critic_loss = jnp.mean((predicted_grasp_q - target_grasp_q) ** 2)
+        critic_loss = jnp.mean((predicted_grasp_q - target_grasp_q) ** 2)
 
         info = {
-            "grasp_critic_loss": grasp_critic_loss,
+            "grasp_critic_loss": critic_loss,
             "predicted_grasp_qs": jnp.mean(predicted_grasp_q),
             "target_grasp_qs": jnp.mean(target_grasp_q),
             "grasp_rewards": grasp_rewards.mean(),
@@ -424,8 +424,8 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
 
             if not self.config["cl"]["soft"]:
                 # constraint satisfied if pre_grasp_q * constraint_coeff - post_grasp_q <= constraint_eps * max(abs(pre_grasp_q), abs(post_grasp_q))
-                constraint_coeff = self.config["cl"]["constraint_coeff"]
-                constraint_eps = self.config["cl"]["constraint_eps"]
+                constraint_coeff = jnp.array(self.config["cl"]["constraint_coeff"])
+                constraint_eps = jnp.array(self.config["cl"]["constraint_eps"])
 
                 qf_diff = jnp.where(
                     constraint_coeff * o_pre_qf - o_post_qf <= constraint_eps * jnp.maximum(jnp.abs(o_pre_qf), jnp.abs(o_post_qf)),
@@ -444,8 +444,8 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
                     "grasp_qf_diff": qf_diff.mean(),
                 }
             else:
-                constraint_coeff = self.config["cl"]["constraint_coeff"]
-                reward_coeff = self.config["cl"]["reward_coeff"]
+                constraint_coeff = jnp.array(self.config["cl"]["constraint_coeff"])
+                reward_coeff = jnp.array(self.config["cl"]["reward_coeff"])
                 
                 # Q(o_pre, pi(o_pre)) <= Q(o_post, pi(o_post))
                 state_losses = reward_coeff * (o_pre_qf - o_post_qf)
@@ -482,13 +482,13 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
                 if self.config["cl"]["enable_action_constraint"]:
                     chex.assert_shape(pref_batch['a_pi'], (batch_size, None))
                     chex.assert_shape(pref_batch['a_exp'], (batch_size, None))
-                    a_pi = pref_batch['a_pi'][:,-1]
-                    a_ex = pref_batch['a_exp'][:,-1]
+                    a_pi = jnp.array(jnp.round(pref_batch['a_pi'][:,-1] + 1), dtype=jnp.int32)
+                    a_ex = jnp.array(jnp.round(pref_batch['a_exp'][:,-1] + 1), dtype=jnp.int32)
                     
                     rng, o_pre_a_pi_qf_key, o_pre_a_ex_qf_key = jax.random.split(rng, 3)
                     o_pre_a_pi_qf = self.forward_grasp_critic(o_pre, rng=o_pre_a_pi_qf_key, grad_params=params)[jnp.arange(batch_size), a_pi]
                     chex.assert_shape(o_pre_a_pi_qf, (batch_size,))
-                    o_pre_a_ex_qf = self.forward_critic(o_pre, rng=o_pre_a_ex_qf_key, grad_params=params)[jnp.arange(batch_size), a_ex]
+                    o_pre_a_ex_qf = self.forward_grasp_critic(o_pre, rng=o_pre_a_ex_qf_key, grad_params=params)[jnp.arange(batch_size), a_ex]
                     chex.assert_shape(o_pre_a_pi_qf, (batch_size,))
 
                     action_losses = reward_coeff * (o_pre_a_pi_qf - o_pre_a_ex_qf)
@@ -502,7 +502,7 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
                     }
                     critic_loss += action_loss
 
-        return grasp_critic_loss, info
+        return critic_loss, info
 
 
     def policy_loss_fn(self, batch, params: Params, rng: PRNGKey):
