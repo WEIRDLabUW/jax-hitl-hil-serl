@@ -136,7 +136,7 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng, pref_data_stor
                 sampling_rng, key = jax.random.split(sampling_rng)
                 actions = agent.sample_actions(
                     observations=jax.device_put(obs),
-                    argmax=False,
+                    argmax=True,
                     seed=key
                 )
                 actions = np.asarray(jax.device_get(actions))
@@ -299,7 +299,6 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng, pref_data_stor
                     if this_intervention is None:
                         print("Error: Should not be None")
                     interventions.append(this_intervention)
-                    this_intervention = None
                     # add to preference buffer
                     if FLAGS.method != 'rlif':
                         pref_datapoint = dict(
@@ -311,6 +310,7 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng, pref_data_stor
                         )
                         pref_data_store.insert(pref_datapoint)
                         preference_datas.append(pref_datapoint)
+                    this_intervention = None
 
                     if abs(FLAGS.optimism) > 1e-9:
                         print_cyan(f"Adding optimism transition with reward={FLAGS.optimism} and done={FLAGS.optimism_done_mask}.")
@@ -329,6 +329,7 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng, pref_data_stor
                 already_intervened = False
 
             if (done or truncated) and this_intervention is not None:
+                print_cyan(f"Ended intervention of {this_intervention['t1'] - this_intervention['t0']} steps.")
                 interventions.append(this_intervention)
                 # add to preference buffer
                 if FLAGS.method != 'rlif':
@@ -341,7 +342,7 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng, pref_data_stor
                     )
                     pref_data_store.insert(pref_datapoint)
                     preference_datas.append(pref_datapoint)
-                    this_intervention = None
+                this_intervention = None
 
             running_return += reward
             transition = dict(

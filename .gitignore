@@ -82,3 +82,4 @@ demo_data/
 examples/experiments/**/debug_*/
 examples/experiments/**/*.pkl
 examples/experiments/**/checkpoint_*
+**/*.out

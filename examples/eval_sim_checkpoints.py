@@ -32,6 +32,7 @@ flags.DEFINE_integer("seed", 42, "Random seed.")
 flags.DEFINE_string("checkpoint_path", None, "Path to save checkpoints.")
 flags.DEFINE_integer("eval_checkpoint_step", 0, "Step to evaluate the checkpoint.")
 flags.DEFINE_integer("eval_n_trajs", 0, "Number of trajectories to evaluate.")
+flags.DEFINE_string("save_to_txt", None, "Where to save the results to.")
 
 
 def print_green(x):
@@ -43,24 +44,15 @@ def print_yellow(x):
 def print_cyan(x):
     return print("\033[96m {}\033[00m".format(x))
 
-def _get_exp_name(config_mapping: dict, default_exp_name: str = "cube_reach3"):
-    print()
-    print("Please provide a exp_name from the following:")
-    print(f"{list(config_mapping.keys())}")
-    exp_name = input(f"['{default_exp_name}'] ")
-    if exp_name == "":
-        exp_name = default_exp_name
-    print(exp_name)
-    return exp_name
-
 
 def main(_):
+    print_green(FLAGS)
     exp_name = FLAGS.exp_name
     enable_cl = FLAGS.method in ["cl", "soft_cl"]
 
     config = CONFIG_MAPPING[exp_name]()
     env = config.get_environment(
-        fake_env=True,
+        fake_env=False,
         save_video=False,
         classifier=True,
     )
@@ -77,8 +69,16 @@ def main(_):
         )
         include_grasp_penalty = False
     elif config.setup_mode == 'single-arm-learned-gripper':
-        intervene_steps = 0  # Default number of steps between pre and post intervention states
-        constraint_eps = 0.1  # Default constraint epsilon
+        cl_config = {
+            "enabled": enable_cl,
+            "soft": FLAGS.method == "soft_cl",
+            "enable_margin_constraint": True,
+            "enable_action_constraint": True,
+            "constraint_coeff": 1.0,
+            "constraint_eps": 0.0,
+            "reward_coeff": 1.0,
+        }
+        print_green(f"Using CL Config: {cl_config}")
 
         agent: SACAgentHybridSingleArm = make_sac_pixel_agent_hybrid_single_arm(
             seed=FLAGS.seed,
@@ -88,9 +88,7 @@ def main(_):
             encoder_type=config.encoder_type,
             discount=config.discount,
             enable_cl=enable_cl,
-            soft_cl = FLAGS.method == "soft_cl",
-            intervene_steps=intervene_steps,
-            constraint_eps=constraint_eps,
+            cl_config=cl_config,
         )
         include_grasp_penalty = True
     elif config.setup_mode == 'dual-arm-learned-gripper':
@@ -128,7 +126,7 @@ def main(_):
             rng, key = jax.random.split(rng)
             actions = agent.sample_actions(
                 observations=jax.device_put(obs),
-                argmax=False,
+                argmax=True,
                 seed=key
             )
             actions = np.asarray(jax.device_get(actions))
@@ -149,7 +147,7 @@ def main(_):
     print(f"success rate: {success_counter / FLAGS.eval_n_trajs}")
     print(f"average time: {np.mean(time_list)}")
 
-    with open("text.txt", "a") as f:
+    with open(FLAGS.save_to_txt, "a") as f:
         f.write(f"{FLAGS.eval_checkpoint_step} - {success_counter / FLAGS.eval_n_trajs} ({FLAGS.eval_n_trajs})\n")
 
 if __name__ == "__main__":
