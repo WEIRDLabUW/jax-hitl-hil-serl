@@ -16,12 +16,15 @@ from natsort import natsorted
 from pynput import keyboard
 import requests
 import cv2
+import threading
+import queue
 
 from serl_launcher.agents.continuous.sac import SACAgent
 from serl_launcher.agents.continuous.sac_hybrid_single import SACAgentHybridSingleArm
 from serl_launcher.agents.continuous.sac_hybrid_dual import SACAgentHybridDualArm
 from serl_launcher.utils.timer_utils import Timer
 from serl_launcher.utils.train_utils import concat_batches
+from serl_launcher.utils.tools import ImageDisplayer, q_image
 
 from agentlace.trainer import TrainerServer, TrainerClient
 from agentlace.data.data_store import QueuedDataStore
@@ -53,6 +56,8 @@ flags.DEFINE_boolean("save_video", False, "Save video.")
 
 flags.DEFINE_float("optimism", 0.0, "Whether or not to add a small amount of bonus to the post-state of interventions.")
 flags.DEFINE_boolean("optimism_done_mask", False, "The done to be set for the optimism transition.")
+flags.DEFINE_boolean("show_q_values", False, "Whether or not to open another window that shows the live Q values.")
+flags.DEFINE_boolean("state_based", False, "Whether or not to use states instead of image + encoder.")
 flags.DEFINE_boolean(
     "debug", False, "Debug mode."
 )  # debug mode will disable wandb logging
@@ -220,6 +225,11 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng, pref_data_stor
     a_int_pi = None
     a_int_exp = None
 
+    if FLAGS.show_q_values:
+        q_queue = queue.Queue()
+        q_display = ImageDisplayer(q_queue, "q_display")
+        q_display.start()
+
     pbar = tqdm.tqdm(range(start_step, config.max_steps), dynamic_ncols=True)
     print(config.buffer_period)
     from_time = time.time()
@@ -242,6 +252,9 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng, pref_data_stor
                 actions = np.asarray(jax.device_get(actions))
 
         # Step environment
+        if FLAGS.show_q_values:
+            q_value = float(np.asarray(jax.device_get(agent.forward_critic(jax.device_put(obs), actions[:-1], rng=key).min())))
+            q_value_grasp = float(np.asarray(jax.device_get(agent.forward_grasp_critic(jax.device_put(obs), rng=key)[int(actions[-1] + 1)])))
         with timer.context("step_env"):
 
             next_obs, reward, done, truncated, info = env.step(actions)
@@ -255,6 +268,10 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng, pref_data_stor
                 print("failure detected")
                 failure_key = False
                 truncated = True
+            if FLAGS.show_q_values:
+                info['q_value_grasp'] = q_value_grasp
+                info['q_value'] = q_value
+                q_queue.put({'q_image': q_image(q_value, q_value_grasp, 'intervene_action' in info)})
 
             # override the action with the intervention action
             if "intervene_action" in info:
@@ -451,6 +468,11 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng, pref_data_stor
         if step % config.log_period == 0:
             stats = {"timer": timer.get_average_times()}
             client.request("send-stats", stats)
+    
+    if FLAGS.show_q_values:
+        q_queue.put(None)
+        cv2.destroyAllWindows()
+        q_display.join()
 
 
 ##############################################################################
@@ -572,6 +594,10 @@ def learner(rng, agent, replay_buffer, demo_buffer, preference_buffer = None, wa
     for step in tqdm.tqdm(
         range(start_step, config.max_steps), dynamic_ncols=True, desc="learner"
     ):
+        # if step > len(replay_buffer) * 1 + 1:
+        #     while step > len(replay_buffer) * 1 + 1:
+        #         time.sleep(0.1)
+        #     print(f"Training for another {len(replay_buffer) * 1 + 1 - step + 1} steps...")
         # run n-1 critic updates and 1 critic + actor update.
         # This makes training on GPU faster by reducing the large batch transfer time from CPU to GPU
         for critic_step in range(config.cta_ratio - 1):
@@ -647,6 +673,7 @@ def main(_):
         fake_env=FLAGS.learner,
         save_video=FLAGS.save_video,
         classifier=True,
+        state_based=FLAGS.state_based,
     )
     env = RecordEpisodeStatistics(env)
 
@@ -683,6 +710,7 @@ def main(_):
             discount=config.discount,
             enable_cl=enable_cl,
             cl_config=cl_config,
+            has_image=not FLAGS.state_based,
         )
         include_grasp_penalty = True
     elif config.setup_mode == 'dual-arm-learned-gripper':

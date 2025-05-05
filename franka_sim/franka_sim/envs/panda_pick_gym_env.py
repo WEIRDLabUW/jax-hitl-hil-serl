@@ -51,6 +51,8 @@ class ImageDisplayer(threading.Thread):
 class PandaPickCubeGymEnv(MujocoGymEnv):
     metadata = {"render_modes": ["rgb_array", "human"]}
 
+    fixed_block_position: bool
+
     def __init__(
         self,
         action_scale: np.ndarray = np.asarray([0.1, 1]),
@@ -62,10 +64,12 @@ class PandaPickCubeGymEnv(MujocoGymEnv):
         render_mode: Literal["rgb_array", "human"] = "rgb_array",
         image_obs: bool = False,
         show_viewer: bool = False,
+        fixed_block_position: bool = False,
     ):
         self._action_scale = action_scale
         self.render_spec = render_spec
         self.show_viewer = show_viewer
+        self.fixed_block_position = fixed_block_position
 
         super().__init__(
             xml_path=_XML_PATH,
@@ -174,6 +178,10 @@ class PandaPickCubeGymEnv(MujocoGymEnv):
         self._viewer = MujocoRenderer(
             self.model,
             self.data,
+            {
+                'elevation': -30,
+                'azimuth': 180
+            }
         )
         self._viewer.render(self.render_mode)
         
@@ -197,7 +205,10 @@ class PandaPickCubeGymEnv(MujocoGymEnv):
         self._data.mocap_pos[0] = tcp_pos
 
         # Sample a new block position.
-        block_xy = np.random.uniform(*_SAMPLING_BOUNDS)
+        if self.fixed_block_position:
+            block_xy = np.array([0.45905119, 0 ])
+        else:
+            block_xy = np.random.uniform(*_SAMPLING_BOUNDS)
         self._data.jnt("block").qpos[:3] = (*block_xy, self._block_z)
         mujoco.mj_forward(self._model, self._data)
 

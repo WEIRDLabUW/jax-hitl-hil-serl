@@ -153,6 +153,7 @@ def make_sac_pixel_agent_hybrid_single_arm(
     discount=0.97,
     enable_cl=False,
     cl_config: dict = {},
+    has_image: bool = True,
 ):
     agent = SACAgentHybridSingleArm.create_pixels(
         jax.random.PRNGKey(seed),
@@ -196,7 +197,8 @@ def make_sac_pixel_agent_hybrid_single_arm(
         target_entropy=target_entropy,
         augmentation_function=make_batch_augmentation_func(image_keys),
         enable_cl=enable_cl,
-        cl=cl_config
+        cl=cl_config,
+        has_image=has_image,
     )
     return agent
 
