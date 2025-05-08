@@ -43,7 +43,7 @@ from experiments.mappings import CONFIG_MAPPING
 FLAGS = flags.FLAGS
 
 flags.DEFINE_string("exp_name", None, "Name of experiment corresponding to folder.")
-flags.DEFINE_string("method", "rlif", "valid values: rlif, cl, hil, soft_cl")
+flags.DEFINE_string("method", "rlif", "Valid values: rlif, cl, soft_cl, hgdagger")
 flags.DEFINE_integer("seed", 42, "Random seed.")
 flags.DEFINE_boolean("learner", False, "Whether this is a learner.")
 flags.DEFINE_boolean("actor", False, "Whether this is an actor.")
@@ -53,6 +53,7 @@ flags.DEFINE_string("checkpoint_path", None, "Path to save checkpoints.")
 flags.DEFINE_integer("eval_checkpoint_step", 0, "Step to evaluate the checkpoint.")
 flags.DEFINE_integer("eval_n_trajs", 0, "Number of trajectories to evaluate.")
 flags.DEFINE_boolean("save_video", False, "Save video.")
+flags.DEFINE_boolean("use_bc_loss", False, "Whether to add a crude bc max likelihood loss on the policy.")
 
 flags.DEFINE_float("optimism", 0.0, "Whether or not to add a small amount of bonus to the post-state of interventions.")
 flags.DEFINE_boolean("optimism_done_mask", False, "The done to be set for the optimism transition.")
@@ -106,7 +107,7 @@ def on_press(key):
         print("error")
         pass
 
-def actor(agent, data_store, intvn_data_store, env, sampling_rng, pref_data_store = None):
+def actor(agent, data_store, intvn_data_store, env, sampling_rng, pref_data_store = None, bc_data_store = None):
     """
     This is the actor loop, which runs when "--actor" is set to True.
     """
@@ -181,6 +182,9 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng, pref_data_stor
 
     if pref_data_store is not None:
         datastore_dict["actor_env_pref"] = pref_data_store
+    if FLAGS.use_bc_loss:
+        assert bc_data_store is not None
+        datastore_dict["actor_env_bc"] = bc_data_store
 
     client = TrainerClient(
         "actor_env",
@@ -192,9 +196,14 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng, pref_data_stor
     )
 
     # Function to update the agent with new params
+    learner_step = 0
     def update_params(params):
-        nonlocal agent
-        agent = agent.replace(state=agent.state.replace(params=params))
+        if isinstance(params, dict) and set(params.keys()) == set(["step"]):
+            nonlocal learner_step
+            learner_step = params['step']
+        else:
+            nonlocal agent
+            agent = agent.replace(state=agent.state.replace(params=params))
 
     client.recv_network_callback(update_params)
 
@@ -205,6 +214,7 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng, pref_data_stor
     interventions = []
     this_intervention = None
     preference_datas = []
+    bc_transitions = []
 
     print("reset start")
     obs, _ = env.reset()
@@ -317,7 +327,7 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng, pref_data_stor
                         print("Error: Should not be None")
                     interventions.append(this_intervention)
                     # add to preference buffer
-                    if FLAGS.method != 'rlif':
+                    if FLAGS.method in ["cl", "soft_cl"]:
                         pref_datapoint = dict(
                             pre_obs=pre_int_obs,
                             post_obs=post_int_obs,
@@ -349,7 +359,7 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng, pref_data_stor
                 print_cyan(f"Ended intervention of {this_intervention['t1'] - this_intervention['t0']} steps.")
                 interventions.append(this_intervention)
                 # add to preference buffer
-                if FLAGS.method != 'rlif':
+                if FLAGS.method in ["cl", "soft_cl"]:
                     pref_datapoint = dict(
                         pre_obs=pre_int_obs,
                         post_obs=post_int_obs,
@@ -376,6 +386,9 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng, pref_data_stor
                 transition['grasp_penalty']= info['grasp_penalty']
             data_store.insert(transition)
             transitions.append(copy.deepcopy(transition) | {'info': info})
+            if FLAGS.use_bc_loss and "intervene_action" in info:
+                bc_data_store.insert(transition)
+                bc_transitions.append(transition)
 
             obs = next_obs
             if done or truncated:
@@ -411,6 +424,12 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng, pref_data_stor
                 # input("Waiting for input to proceed...")
                 time.sleep(1.0)
                 obs, _ = env.reset()
+                # For synchronizing learner and actor...
+                if step > learner_step * 1 + 300:
+                    print("Stopped actor")
+                    while step > learner_step * 1 + 300:
+                        time.sleep(0.5)
+                    print("Released actor")
                 print("reset end")
                 from_time = time.time()
 
@@ -420,6 +439,8 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng, pref_data_stor
             demo_buffer_path = os.path.join(FLAGS.checkpoint_path, "demo_buffer")
             interventions_buffer_path = os.path.join(FLAGS.checkpoint_path, "interventions")
             preference_buffer_path = os.path.join(FLAGS.checkpoint_path, "preference_buffer")
+            bc_buffer_path = os.path.join(FLAGS.checkpoint_path, "bc_buffer")
+
             if not os.path.exists(buffer_path):
                 os.makedirs(buffer_path)
             if not os.path.exists(demo_buffer_path):
@@ -428,31 +449,31 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng, pref_data_stor
                 os.makedirs(interventions_buffer_path)
             if not os.path.exists(preference_buffer_path):
                 os.makedirs(preference_buffer_path)
+            if not os.path.exists(bc_buffer_path):
+                os.makedirs(bc_buffer_path)
+            
             with open(os.path.join(buffer_path, f"transitions_{step}.pkl"), "wb") as f:
                 fp = os.path.join(buffer_path, f"transitions_{step}.pkl")
                 print(f"Dumping {len(transitions_full_trajs)} transitions out of {len(transitions)} to {fp} !!!")
                 pkl.dump(transitions_full_trajs, f)
                 transitions = transitions[len(transitions_full_trajs):]
                 transitions_full_trajs = []
-            # Commented out because offline buffer = demos.
-            # with open(
-            #     os.path.join(demo_buffer_path, f"transitions_{step}.pkl"), "wb"
-            # ) as f:
-            #     fp = os.path.join(demo_buffer_path, f"transitions_{step}.pkl")
-            #     print(f"Dumping {len(demo_transitions_full_trajs)} expert transitions out of {len(demo_transitions)} to {fp} !!!")
-            #     pkl.dump(demo_transitions_full_trajs, f)
-            #     demo_transitions = demo_transitions[len(demo_transitions_full_trajs):]
-            #     demo_transitions_full_trajs = []
+            with open(os.path.join(demo_buffer_path, f"transitions_{step}.pkl"), "wb") as f:
+                fp = os.path.join(demo_buffer_path, f"transitions_{step}.pkl")
+                print(f"Dumping {len(demo_transitions_full_trajs)} expert transitions out of {len(demo_transitions)} to {fp} !!!")
+                pkl.dump(demo_transitions_full_trajs, f)
+                demo_transitions = demo_transitions[len(demo_transitions_full_trajs):]
+                demo_transitions_full_trajs = []
             with open(os.path.join(interventions_buffer_path, f"transitions_{step}.pkl"), "wb") as f:
                 fp = os.path.join(interventions_buffer_path, f"transitions_{step}.pkl")
                 print(f"Dumping {len(interventions)} interventions to {fp}")
                 pkl.dump(interventions, f)
                 interventions = []
-            with open(os.path.join(preference_buffer_path, f"transitions_{step}.pkl"), "wb") as f:
-                fp = os.path.join(preference_buffer_path, f"transitions_{step}.pkl")
-                print(f"Dumping {len(preference_datas)} interventions to {fp}")
-                pkl.dump(preference_datas, f)
-                preference_datas = []
+            with open(os.path.join(bc_buffer_path, f"transitions_{step}.pkl"), "wb") as f:
+                fp = os.path.join(bc_buffer_path, f"transitions_{step}.pkl")
+                print(f"Dumping {len(bc_transitions)} interventions to {fp}")
+                pkl.dump(bc_transitions, f)
+                bc_transitions = []
         
         if (
             step > 0
@@ -478,7 +499,7 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng, pref_data_stor
 ##############################################################################
 
 
-def learner(rng, agent, replay_buffer, demo_buffer, preference_buffer = None, wandb_logger=None):
+def learner(rng, agent: SACAgentHybridSingleArm, replay_buffer, demo_buffer, preference_buffer = None, bc_buffer = None, wandb_logger=None):
     """
     The learner loop, which runs when "--learner" is set to True.
     """
@@ -508,7 +529,7 @@ def learner(rng, agent, replay_buffer, demo_buffer, preference_buffer = None, wa
         """Callback for when server receives stats request."""
         assert type == "send-stats", f"Invalid request type: {type}"
         if wandb_logger is not None:
-            wandb_logger.log(payload, step=step + config.pretraining_steps)
+            wandb_logger.log(payload, step=step) # + config.pretraining_steps)
         return {}  # not expecting a response
 
     # Create server
@@ -519,14 +540,14 @@ def learner(rng, agent, replay_buffer, demo_buffer, preference_buffer = None, wa
         server.register_data_store("actor_env_pref", preference_buffer)
     server.start(threaded=True)
 
-    if step == 0 and config.pretraining_steps > 0:
-        epochs = config.pretraining_steps // config.batch_size
-        print(f"Pretraining on {len(demo_buffer)} demo steps for {config.pretraining_steps} steps ({epochs} epochs)...")
-        for epoch in tqdm.tqdm(range(epochs)):
-            batch = demo_buffer.sample(config.batch_size)
-            agent, update_info = agent.update(batch, networks_to_update=frozenset({"critic", "grasp_critic", "actor"}))
-            # agent, update_info = agent.update_bc(batch)
-            wandb_logger.log({'pretraining': update_info}, step=(epoch + 1) * config.batch_size)
+    if FLAGS.use_bc_loss and config.pretraining_steps > 0:
+        pbar = tqdm.tqdm(range(config.pretraining_steps))
+        for step in pbar:
+            bc_batch = bc_buffer.sample(config.batch_size)
+            agent, update_info = agent.update_bc(bc_batch)
+            pbar.set_description(f"bc_loss = {round(update_info['actor']['bc_loss'], 3)}")
+            wandb_logger.log(update_info, step=step)
+        step = config.pretraining_steps
         agent = jax.block_until_ready(agent)
         server.publish_network(agent.state.params)
         checkpoints.save_checkpoint(
@@ -566,8 +587,17 @@ def learner(rng, agent, replay_buffer, demo_buffer, preference_buffer = None, wa
         },
         device=sharding.replicate(),
     )
-    if FLAGS.method != 'rlif':
+    if FLAGS.method in ["cl", "soft_cl"]:
+        assert preference_buffer is not None
         preference_iterator = preference_buffer.get_iterator(
+            sample_args={
+                "batch_size": config.batch_size,
+            },
+            device=sharding.replicate(),
+        )
+    if FLAGS.use_bc_loss:
+        assert bc_buffer is not None
+        bc_iterator = bc_buffer.get_iterator(
             sample_args={
                 "batch_size": config.batch_size,
             },
@@ -592,62 +622,57 @@ def learner(rng, agent, replay_buffer, demo_buffer, preference_buffer = None, wa
     
     '''
     for step in tqdm.tqdm(
-        range(start_step, config.max_steps), dynamic_ncols=True, desc="learner"
+        range(start_step + config.pretraining_steps, config.max_steps + config.pretraining_steps), dynamic_ncols=True, desc="learner"
     ):
-        # if step > len(replay_buffer) * 1 + 1:
-        #     while step > len(replay_buffer) * 1 + 1:
-        #         time.sleep(0.1)
-        #     print(f"Training for another {len(replay_buffer) * 1 + 1 - step + 1} steps...")
+        if step - config.pretraining_steps > len(replay_buffer) * 1 + 1:
+            while step - config.pretraining_steps > len(replay_buffer) * 1 + 1:
+                time.sleep(0.5)
+            print(f"Training for another {(len(replay_buffer) * 1 + 1) - (step - config.pretraining_steps) + 1} steps...")
         # run n-1 critic updates and 1 critic + actor update.
         # This makes training on GPU faster by reducing the large batch transfer time from CPU to GPU
-        for critic_step in range(config.cta_ratio - 1):
-            with timer.context("sample_replay_buffer"):
-                batch = next(replay_iterator)
-                demo_batch = next(demo_iterator)
-                batch = concat_batches(batch, demo_batch, axis=0)
-                pref_batch = None
-                if preference_buffer is not None:
-                    pref_batch = next(preference_iterator)
+        if FLAGS.method != "hgdagger":
+            for critic_step in range(config.cta_ratio - 1):
+                with timer.context("sample_replay_buffer"):
+                    batch = next(replay_iterator)
+                    demo_batch = next(demo_iterator)
+                    batch = concat_batches(batch, demo_batch, axis=0)
+                    pref_batch = next(preference_iterator) if preference_buffer is not None else None
+                    bc_batch = next(bc_iterator) if bc_buffer is not None else None
 
-            with timer.context("train_critics"):
-                if preference_buffer is not None:
+                with timer.context("train_critics"):
                     agent, critics_info = agent.update(
                         batch,
                         networks_to_update=train_critic_networks_to_update,
                         pref_batch=pref_batch,
-                    )
-                else:
-                    agent, critics_info = agent.update(
-                        batch,
-                        networks_to_update=train_critic_networks_to_update,
+                        bc_batch=bc_batch,
                     )
 
         with timer.context("train"):
             batch = next(replay_iterator)
             demo_batch = next(demo_iterator)
             batch = concat_batches(batch, demo_batch, axis=0)
+            pref_batch = next(preference_iterator) if preference_buffer is not None else None
+            bc_batch = next(bc_iterator) if bc_buffer is not None else None
 
-            if preference_buffer is not None:
-                pref_batch = next(preference_iterator)
-                agent, update_info = agent.update(
-                    batch,
-                    networks_to_update=train_networks_to_update,
-                    pref_batch=pref_batch,
-                )
+            if FLAGS.method == "hgdagger":
+                agent, update_info = agent.update_bc(bc_batch)
             else:
                 agent, update_info = agent.update(
                     batch,
                     networks_to_update=train_networks_to_update,
+                    pref_batch=pref_batch,
+                    bc_batch=bc_batch,
                 )
 
         # publish the updated network
         if step > 0 and step % (config.steps_per_update) == 0:
             agent = jax.block_until_ready(agent)
             server.publish_network(agent.state.params)
+            server.publish_network({'step': step - config.pretraining_steps})
 
         if step % config.log_period == 0 and wandb_logger:
-            wandb_logger.log(update_info, step=step + config.pretraining_steps)
-            wandb_logger.log({"timer": timer.get_average_times()}, step=step + config.pretraining_steps)
+            wandb_logger.log(update_info, step=step) # + config.pretraining_steps)
+            wandb_logger.log({"timer": timer.get_average_times()}, step=step) # + config.pretraining_steps)
 
 
 ##############################################################################
@@ -662,6 +687,9 @@ def main(_):
         print_green("Using RLIF.")
     if enable_cl:
         print_green("Using CL.")
+    if FLAGS.method == "hgdagger":
+        print_green("Using HG-DAgger.")
+        assert FLAGS.use_bc_loss
 
     assert config.batch_size % num_devices == 0
     # seed
@@ -711,6 +739,7 @@ def main(_):
             enable_cl=enable_cl,
             cl_config=cl_config,
             has_image=not FLAGS.state_based,
+            use_bc_loss=FLAGS.use_bc_loss
         )
         include_grasp_penalty = True
     elif config.setup_mode == 'dual-arm-learned-gripper':
@@ -760,8 +789,18 @@ def main(_):
         )
         return replay_buffer, wandb_logger
 
+    def create_demo_buffer():
+        demo_buffer = MemoryEfficientReplayBufferDataStore(
+            env.observation_space,
+            env.action_space,
+            capacity=config.replay_buffer_capacity,
+            image_keys=config.image_keys,
+            include_grasp_penalty=include_grasp_penalty,
+        )
+        return demo_buffer
+
     def create_preference_buffer():
-        if FLAGS.method in ["rlif"]:
+        if FLAGS.method in ["rlif", "hgdagger"]:
             return None
         preference_buffer = PreferenceBufferDataStore(
             env.observation_space,
@@ -772,52 +811,29 @@ def main(_):
         )
         return preference_buffer
 
-    if FLAGS.learner:
-        sampling_rng = jax.device_put(sampling_rng, device=sharding.replicate())
-        replay_buffer, wandb_logger = create_replay_buffer_and_wandb_logger()
-        preference_buffer = create_preference_buffer()
-        demo_buffer = MemoryEfficientReplayBufferDataStore(
+    def create_bc_buffer():
+        if not FLAGS.use_bc_loss:
+            return None
+        bc_buffer = MemoryEfficientReplayBufferDataStore(
             env.observation_space,
             env.action_space,
             capacity=config.replay_buffer_capacity,
             image_keys=config.image_keys,
             include_grasp_penalty=include_grasp_penalty,
         )
+        return bc_buffer
 
-        assert FLAGS.demo_path is not None
-        num_demos = 0
-        for path in FLAGS.demo_path:
-            with open(path, "rb") as f:
-                transitions = pkl.load(f)
-                for transition in transitions:
-                    for k in set(transition['observations'].keys()) - set(config.image_keys + ['state']):
-                        del transition['observations'][k]
-                        del transition['next_observations'][k]
-                    for k in config.image_keys:
-                        img = transition['observations'][k]
-                        if img.ndim == 4 and img.shape[0] == 1:
-                            img = img[0]
-                        transition['observations'][k] = cv2.resize(img, (128, 128))
-                        img = transition['next_observations'][k]
-                        if img.ndim == 4 and img.shape[0] == 1:
-                            img = img[0]
-                        transition['next_observations'][k] = cv2.resize(img, (128, 128))
-                    if transition['actions'].shape == (4,):
-                        transition['actions'] = np.concatenate([transition['actions'][:3], np.zeros((3,)), transition['actions'][3:]], axis=0)
-                    transition['grasp_penalty'] = 0
-                    assert transition['rewards'] < 1 + 1e-6 and transition['rewards'] > -1e-6, f"{transition['rewards']}"
-                    num_demos += transition['rewards']
-                    transition['rewards'] *= config.reward_scale
-                    demo_buffer.insert(transition)
-        print_green(f"demo buffer size: {len(demo_buffer)}")
-        print_green(f"demo count: {num_demos}")
-        print_green(f"online buffer size: {len(replay_buffer)}")
-        if preference_buffer is not None:
-            print_green(f"preference buffer size: {len(preference_buffer)}")
+    if FLAGS.learner:
+        sampling_rng = jax.device_put(sampling_rng, device=sharding.replicate())
+        replay_buffer, wandb_logger = create_replay_buffer_and_wandb_logger()
+        demo_buffer = create_demo_buffer()
+        preference_buffer = create_preference_buffer()
+        bc_buffer = create_bc_buffer()
 
-        if FLAGS.checkpoint_path is not None and os.path.exists(
-            os.path.join(FLAGS.checkpoint_path, "buffer")
-        ):
+        prev_checkpoint_exist: bool = FLAGS.checkpoint_path is not None and os.path.exists(FLAGS.checkpoint_path)
+
+        if prev_checkpoint_exist:
+            assert os.path.exists(os.path.join(FLAGS.checkpoint_path, "buffer"))
             for file in glob.glob(os.path.join(FLAGS.checkpoint_path, "buffer/*.pkl")):
                 with open(file, "rb") as f:
                     transitions = pkl.load(f)
@@ -827,9 +843,8 @@ def main(_):
                 f"Loaded previous buffer data. Replay buffer size: {len(replay_buffer)}"
             )
 
-        if preference_buffer is not None and FLAGS.checkpoint_path is not None and os.path.exists(
-            os.path.join(FLAGS.checkpoint_path, "preference_buffer")
-        ):
+        if prev_checkpoint_exist and preference_buffer is not None:
+            assert os.path.exists(os.path.join(FLAGS.checkpoint_path, "preference_buffer"))
             for file in glob.glob(os.path.join(FLAGS.checkpoint_path, "preference_buffer/*.pkl")):
                 with open(file, "rb") as f:
                     preferences = pkl.load(f)
@@ -839,12 +854,9 @@ def main(_):
                 f"Loaded previous preference buffer data. Preference buffer size: {len(preference_buffer)}"
             )
 
-        if FLAGS.checkpoint_path is not None and os.path.exists(
-            os.path.join(FLAGS.checkpoint_path, "demo_buffer")
-        ):
-            for file in glob.glob(
-                os.path.join(FLAGS.checkpoint_path, "demo_buffer/*.pkl")
-            ):
+        if prev_checkpoint_exist:
+            assert os.path.exists(os.path.join(FLAGS.checkpoint_path, "demo_buffer"))
+            for file in glob.glob(os.path.join(FLAGS.checkpoint_path, "demo_buffer/*.pkl")):
                 with open(file, "rb") as f:
                     transitions = pkl.load(f)
                     for transition in transitions:
@@ -852,6 +864,53 @@ def main(_):
             print_green(
                 f"Loaded previous demo buffer data. Demo buffer size: {len(demo_buffer)}"
             )
+        
+        if prev_checkpoint_exist and bc_buffer is not None:
+            assert os.path.exists(os.path.join(FLAGS.checkpoint_path, "bc_buffer"))
+            for file in glob.glob(os.path.join(FLAGS.checkpoint_path, "bc_buffer/*.pkl")):
+                with open(file, "rb") as f:
+                    transitions = pkl.load(f)
+                    for transition in transitions:
+                        bc_buffer.insert(transition)
+            print_green(
+                f"Loaded previous bc buffer data. Bc buffer size: {len(bc_buffer)}"
+            )
+
+        assert FLAGS.demo_path is not None
+        if not prev_checkpoint_exist:
+            num_demos = 0
+            for path in FLAGS.demo_path:
+                with open(path, "rb") as f:
+                    transitions = pkl.load(f)
+                    for transition in transitions:
+                        # Transforming the data
+                        for k in set(transition['observations'].keys()) - set(config.image_keys + ['state']):
+                            del transition['observations'][k]
+                            del transition['next_observations'][k]
+                        for k in config.image_keys:
+                            img = transition['observations'][k]
+                            if img.ndim == 4 and img.shape[0] == 1:
+                                img = img[0]
+                            transition['observations'][k] = cv2.resize(img, (128, 128))
+                            img = transition['next_observations'][k]
+                            if img.ndim == 4 and img.shape[0] == 1:
+                                img = img[0]
+                            transition['next_observations'][k] = cv2.resize(img, (128, 128))
+                        if transition['actions'].shape == (4,):
+                            transition['actions'] = np.concatenate([transition['actions'][:3], np.zeros((3,)), transition['actions'][3:]], axis=0)
+                        transition['grasp_penalty'] = 0
+                        assert transition['rewards'] < 1 + 1e-6 and transition['rewards'] > -1e-6, f"{transition['rewards']}"
+
+                        num_demos += transition['rewards']
+                        transition['rewards'] *= config.reward_scale
+                        demo_buffer.insert(transition)
+                        if bc_buffer is not None:
+                            bc_buffer.insert(transition)
+            
+            print_green(f"demo buffer size: {len(demo_buffer)}")
+            print_green(f"demo count: {num_demos}")
+            if bc_buffer is not None:
+                print_green(f"bc buffer size: {len(bc_buffer)}")
 
         # learner loop
         print_green("starting learner loop")
@@ -862,17 +921,16 @@ def main(_):
             demo_buffer=demo_buffer,
             wandb_logger=wandb_logger,
             preference_buffer=preference_buffer,
+            bc_buffer=bc_buffer,
         )
 
     elif FLAGS.actor:
         sampling_rng = jax.device_put(sampling_rng, sharding.replicate())
         data_store = QueuedDataStore(10000)  # the queue size on the actor
         intvn_data_store = QueuedDataStore(10000)
+        pref_data_store = QueuedDataStore(10000) if FLAGS.method in ["cl", "soft_cl"] else None
+        bc_data_store = QueuedDataStore(10000) if FLAGS.use_bc_loss else None
 
-        if FLAGS.method in ["cl", "soft_cl"]:
-            pref_data_store = QueuedDataStore(10000)
-        else:
-            pref_data_store = None
         # actor loop
         print_green("starting actor loop")
         actor(
@@ -881,7 +939,8 @@ def main(_):
             intvn_data_store,
             env,
             sampling_rng,
-            pref_data_store,
+            pref_data_store=pref_data_store,
+            bc_data_store=bc_data_store
         )
 
     else:

@@ -18,6 +18,16 @@ from serl_launcher.networks.mlp import MLP
 from serl_launcher.utils.train_utils import _unpack
 
 
+def print_green(x):
+    return print("\033[92m {}\033[00m".format(x))
+
+def print_yellow(x):
+    return print("\033[93m {}\033[00m".format(x))
+
+def print_cyan(x):
+    return print("\033[96m {}\033[00m".format(x))
+
+
 class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
     """
     Online actor-critic supporting several different algorithms depending on configuration:
@@ -505,7 +515,7 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
         return critic_loss, info
 
 
-    def policy_loss_fn(self, batch, params: Params, rng: PRNGKey):
+    def policy_loss_fn(self, batch, bc_batch, params: Params, rng: PRNGKey):
         batch_size = batch["rewards"].shape[0]
         temperature = self.forward_temperature()
 
@@ -532,6 +542,36 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
             "temperature": temperature,
             "entropy": -log_probs.mean(),
         }
+
+        if self.config['use_bc_loss']:
+            assert bc_batch is not None
+            N = bc_batch["rewards"].shape[0]
+
+            rng, bc_rng, bc_grasp_rng = jax.random.split(rng, 3)
+            o_pre = bc_batch["observations"]
+            a_exp = bc_batch["actions"]
+            dist = self.forward_policy(o_pre, rng=bc_rng, grad_params=params)
+            bc_loss = -dist.log_prob(a_exp[:,:-1]).mean()
+            actor_loss += bc_loss * 0.1
+
+            beta = 0.1
+            a_exp_grasp = jnp.array(jnp.round(a_exp[:,-1] + 1), dtype=jnp.int32)
+            chex.assert_shape(a_exp_grasp, (N,))
+            grasp_qs = self.forward_grasp_critic(o_pre, rng=bc_grasp_rng, grad_params=params)
+            chex.assert_shape(grasp_qs, (N, 3))
+            grasp_logprobs = jax.nn.log_softmax(grasp_qs / beta, axis=1)
+            chex.assert_shape(grasp_logprobs, (N, 3))
+            bc_grasp_loss = -grasp_logprobs[jnp.arange(N), a_exp_grasp]
+            chex.assert_shape(bc_grasp_loss, (N,))
+            bc_grasp_loss = bc_grasp_loss.mean()
+
+            actor_loss += bc_grasp_loss * 0.1
+
+            info = info | {
+                "bc_loss": bc_loss,
+                "bc_grasp_loss": bc_grasp_loss,
+                "bc_loss_total": bc_loss + bc_grasp_loss,
+            }
 
         return actor_loss, info
 
@@ -627,11 +667,15 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
 
         return log_alpha_loss, info
 
-    def loss_fns(self, batch, pref_batch = None):
+    def loss_fns(self, batch, pref_batch = None, bc_batch = None):
+        if self.config["use_bc_loss"]:
+            assert bc_batch is not None
+            print_green("Doing BC update.")
+
         loss_dict = {
             "critic": partial(self.critic_loss_fn, batch, pref_batch),
             "grasp_critic": partial(self.grasp_critic_loss_fn, batch, pref_batch),
-            "actor": partial(self.policy_loss_fn, batch),
+            "actor": partial(self.policy_loss_fn, batch, bc_batch),
             "temperature": partial(self.temperature_loss_fn, batch),
         }
 
@@ -652,6 +696,7 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
             {"actor", "critic", "grasp_critic", "temperature"}
         ),
         pref_batch = None,
+        bc_batch = None,
         **kwargs
     ) -> Tuple["SACAgentHybridSingleArm", dict]:
         """
@@ -682,7 +727,7 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
         )
 
         # Compute gradients and update params
-        loss_fns = self.loss_fns(batch, pref_batch=pref_batch, **kwargs)
+        loss_fns = self.loss_fns(batch, pref_batch=pref_batch, bc_batch=bc_batch, **kwargs)
 
         # Only compute gradients for specified steps
         assert networks_to_update.issubset(
@@ -719,30 +764,49 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
 
         return self.replace(state=new_state), info
 
-    def loss_bc(self, batch, params: Params, rng: PRNGKey):
-        rng, policy_rng = jax.random.split(rng)
-        action_distributions = self.forward_policy(
-            batch["observations"], rng=policy_rng, grad_params=params
-        )
-        log_probs = action_distributions.log_prob(batch['actions'])
-        loss = jnp.sum(log_probs)
-        info = {
-            'mean_logprob': jnp.mean(log_probs),
-            'std_logprob': jnp.std(log_probs),
-        }
-        return loss, info
+    def loss_bc(self, bc_batch, params: Params, rng: PRNGKey):
+        assert bc_batch is not None
+        N = bc_batch["rewards"].shape[0]
 
-    def update_bc(
-        self,
-        batch,
-        pmap_axis: Optional[str] = None,
-    ) -> Tuple["SACAgentHybridSingleArm", dict]:
-        loss_fns = {
-            'critic': lambda params, rng: (0.0, {}),
-            'grasp_critic': lambda params, rng: (0.0, {}),
-            'actor': partial(self.loss_bc, batch),
-            'temperature': lambda params, rng: (0.0, {}),
+        rng, bc_rng, bc_grasp_rng = jax.random.split(rng, 3)
+        o_pre = bc_batch["observations"]
+        a_exp = bc_batch["actions"]
+        dist = self.forward_policy(o_pre, rng=bc_rng, grad_params=params)
+        log_probs = dist.log_prob(a_exp[:,:-1])
+        chex.assert_shape(log_probs, (N,))
+        bc_loss = -log_probs.mean()
+
+        info = {
+            "bc_loss": bc_loss,
         }
+
+        beta = 0.1
+        a_exp_grasp = jnp.array(jnp.round(a_exp[:,-1] + 1), dtype=jnp.int32)
+        chex.assert_shape(a_exp_grasp, (N,))
+        grasp_qs = self.forward_grasp_critic(o_pre, rng=bc_grasp_rng, grad_params=params)
+        chex.assert_shape(grasp_qs, (N, 3))
+        grasp_logprobs = jax.nn.log_softmax(grasp_qs / beta, axis=1)
+        chex.assert_shape(grasp_logprobs, (N, 3))
+        bc_grasp_loss = -grasp_logprobs[jnp.arange(N), a_exp_grasp]
+        chex.assert_shape(bc_grasp_loss, (N,))
+        bc_grasp_loss = bc_grasp_loss.mean()
+
+        bc_loss += bc_grasp_loss
+
+        info = info | {
+            "bc_grasp_loss": bc_grasp_loss,
+            "bc_loss_total": bc_loss,
+        }
+
+        return bc_loss, info
+    
+    @jax.jit
+    def update_bc(self, bc_batch, pmap_axis = None):
+        loss_fn_keys = ["critic", "grasp_critic", "actor", "temperature"]
+        if self.config["cl"]["enabled"]:
+            loss_fn_keys += ["log_alpha_state", "log_alpha_gripper_state"]
+        loss_fns = {k: lambda params, rng: (0.0, {}) for k in loss_fn_keys}
+        loss_fns["actor"] = partial(self.loss_bc, bc_batch)
         new_state, info = self.state.apply_loss_fns(
             loss_fns=loss_fns,
             pmap_axis=pmap_axis,
