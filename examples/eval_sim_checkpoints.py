@@ -34,6 +34,7 @@ flags.DEFINE_string("checkpoint_path", None, "Path to save checkpoints.")
 flags.DEFINE_integer("eval_checkpoint_step", 0, "Step to evaluate the checkpoint.")
 flags.DEFINE_integer("eval_n_trajs", 0, "Number of trajectories to evaluate.")
 flags.DEFINE_string("save_to_txt", None, "Where to save the results to.")
+flags.DEFINE_boolean("show_q_values", False, "")
 
 
 def print_green(x):
@@ -53,9 +54,10 @@ def main(_):
 
     config = CONFIG_MAPPING[exp_name]()
     env = config.get_environment(
-        fake_env=False,
+        fake_env=True,
         save_video=False,
         classifier=True,
+        state_based=False,
     )
     rng = jax.random.PRNGKey(FLAGS.seed)
 
@@ -116,9 +118,10 @@ def main(_):
     agent = agent.replace(state=ckpt)
     print_green(f"Overriding agent with checkpoint at {FLAGS.eval_checkpoint_step}.")
 
-    q_queue = queue.Queue()
-    q_display = ImageDisplayer(q_queue, "q_display")
-    q_display.start()
+    if FLAGS.show_q_values:
+        q_queue = queue.Queue()
+        q_display = ImageDisplayer(q_queue, "q_display")
+        q_display.start()
     for episode in range(FLAGS.eval_n_trajs):
         print("reset start")
         ### receive signal from learner and then reset
@@ -133,9 +136,10 @@ def main(_):
                 argmax=True,
                 seed=key
             )
-            q_value = np.asarray(jax.device_get(agent.forward_critic(jax.device_put(obs), actions[:-1], rng=key).min()))
-            q_value_grasp = np.asarray(jax.device_get(agent.forward_grasp_critic(jax.device_put(obs), rng=key)))
-            q_value_grasp_index = int(actions[-1] + 1)
+            if FLAGS.show_q_values:
+                q_value = np.asarray(jax.device_get(agent.forward_critic(jax.device_put(obs), actions[:-1], rng=key).min()))
+                q_value_grasp = np.asarray(jax.device_get(agent.forward_grasp_critic(jax.device_put(obs), rng=key)))
+                q_value_grasp_index = int(actions[-1] + 1)
             actions = np.asarray(jax.device_get(actions))
 
             next_obs, reward, done, truncated, info = env.step(actions)
@@ -144,7 +148,8 @@ def main(_):
             if 'intervene_action' in info:
                 print(info['intervene_action'][-1])
 
-            q_queue.put({'q_image': q_image(q_value, q_value_grasp, q_value_grasp_index, 'intervene_action' in info)})
+            if FLAGS.show_q_values:
+                q_queue.put({'q_image': q_image(q_value, q_value_grasp, q_value_grasp_index, 'intervene_action' in info)})
 
             if done or truncated:
                 if reward:
@@ -159,9 +164,10 @@ def main(_):
     print(f"success rate: {success_counter / FLAGS.eval_n_trajs}")
     print(f"average time: {np.mean(time_list)}")
 
-    q_queue.put(None)
-    cv2.destroyAllWindows()
-    q_display.join()
+    if FLAGS.show_q_values:
+        q_queue.put(None)
+        cv2.destroyAllWindows()
+        q_display.join()
 
     with open(FLAGS.save_to_txt, "a") as f:
         f.write(f"{FLAGS.eval_checkpoint_step} - {success_counter / FLAGS.eval_n_trajs} ({FLAGS.eval_n_trajs})\n")

@@ -20,9 +20,11 @@ class FrankaSimEnv(gym.Wrapper):
             env,
             action_scale: list,
             show_viewer: bool = True,
+            fake_env: bool = False,
         ):
         assert isinstance(env, MujocoGymEnv)
         super().__init__(env)
+        self.fake_env = fake_env
         m = env.model
         d = env.data
         self.action_scale = np.array(action_scale)
@@ -42,6 +44,6 @@ class FrankaSimEnv(gym.Wrapper):
         if self.show_viewer:
             self.viewer.sync()
         time_until_next_step = self.env.control_dt - (time.time() - step_start)
-        if time_until_next_step > 0:
+        if time_until_next_step > 0 and not self.fake_env:
             time.sleep(time_until_next_step)
         return vals

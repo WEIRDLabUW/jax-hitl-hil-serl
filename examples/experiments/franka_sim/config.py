@@ -29,7 +29,7 @@ class TrainConfig(DefaultTrainingConfig):
     reward_scale = 10 # How much to scale actual rewards (not RLIF penalties) for RLIF.
     rlif_minus_one = False
     checkpoint_period = 1000
-    cta_ratio = 2
+    cta_ratio = 5
     random_steps = 0
     discount = 0.98
     buffer_period = 1000
@@ -49,9 +49,9 @@ class TrainConfig(DefaultTrainingConfig):
             time_limit=30.0,
             show_viewer=not fake_env,
             render_spec=GymRenderingSpec(height=512, width=512),
-            fixed_block_position=True,
+            fixed_block_position=False,
         )
-        env = FrankaSimEnv(env, action_scale=[0.1, 0.1, 0.1], show_viewer=False)
+        env = FrankaSimEnv(env, action_scale=[0.1, 0.1, 0.1], show_viewer=False, fake_env=fake_env)
         if not state_based:
             env = SERLObsWrapper(env, proprio_keys=self.proprio_keys)
         env = SimSpacemouseIntervention(env, fake_env=fake_env)
