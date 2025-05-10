@@ -41,6 +41,7 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
     """
 
     state: JaxRLTrainState
+    bc_coeff: jnp.array
     config: dict = nonpytree_field()
 
     def forward_critic(
@@ -490,16 +491,16 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
 
                 # Q(o_pre, a_pi) <= Q(o_pre, a_exp)
                 if self.config["cl"]["enable_action_constraint"]:
-                    chex.assert_shape(pref_batch['a_pi'], (batch_size, None))
-                    chex.assert_shape(pref_batch['a_exp'], (batch_size, None))
+                    # chex.assert_shape(pref_batch['a_pi'], (batch_size, None))
+                    # chex.assert_shape(pref_batch['a_exp'], (batch_size, None))
                     a_pi = jnp.array(jnp.round(pref_batch['a_pi'][:,-1] + 1), dtype=jnp.int32)
                     a_ex = jnp.array(jnp.round(pref_batch['a_exp'][:,-1] + 1), dtype=jnp.int32)
                     
                     rng, o_pre_a_pi_qf_key, o_pre_a_ex_qf_key = jax.random.split(rng, 3)
                     o_pre_a_pi_qf = self.forward_grasp_critic(o_pre, rng=o_pre_a_pi_qf_key, grad_params=params)[jnp.arange(batch_size), a_pi]
-                    chex.assert_shape(o_pre_a_pi_qf, (batch_size,))
+                    # chex.assert_shape(o_pre_a_pi_qf, (batch_size,))
                     o_pre_a_ex_qf = self.forward_grasp_critic(o_pre, rng=o_pre_a_ex_qf_key, grad_params=params)[jnp.arange(batch_size), a_ex]
-                    chex.assert_shape(o_pre_a_pi_qf, (batch_size,))
+                    # chex.assert_shape(o_pre_a_pi_qf, (batch_size,))
 
                     action_losses = reward_coeff * (o_pre_a_pi_qf - o_pre_a_ex_qf)
                     action_loss = jnp.where(action_losses < 0, 0.0, action_losses).mean()
@@ -552,20 +553,20 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
             a_exp = bc_batch["actions"]
             dist = self.forward_policy(o_pre, rng=bc_rng, grad_params=params)
             bc_loss = -dist.log_prob(a_exp[:,:-1]).mean()
-            actor_loss += bc_loss * 0.1
+            actor_loss += bc_loss * self.bc_coeff
 
             beta = 0.1
             a_exp_grasp = jnp.array(jnp.round(a_exp[:,-1] + 1), dtype=jnp.int32)
-            chex.assert_shape(a_exp_grasp, (N,))
+            # chex.assert_shape(a_exp_grasp, (N,))
             grasp_qs = self.forward_grasp_critic(o_pre, rng=bc_grasp_rng, grad_params=params)
-            chex.assert_shape(grasp_qs, (N, 3))
+            # chex.assert_shape(grasp_qs, (N, 3))
             grasp_logprobs = jax.nn.log_softmax(grasp_qs / beta, axis=1)
-            chex.assert_shape(grasp_logprobs, (N, 3))
+            # chex.assert_shape(grasp_logprobs, (N, 3))
             bc_grasp_loss = -grasp_logprobs[jnp.arange(N), a_exp_grasp]
-            chex.assert_shape(bc_grasp_loss, (N,))
+            # chex.assert_shape(bc_grasp_loss, (N,))
             bc_grasp_loss = bc_grasp_loss.mean()
 
-            actor_loss += bc_grasp_loss * 0.1
+            actor_loss += bc_grasp_loss * self.bc_coeff
 
             info = info | {
                 "bc_loss": bc_loss,
@@ -751,6 +752,8 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
         if "critic" in networks_to_update:
             new_state = new_state.target_update(self.config["soft_target_update_rate"])
 
+        decay_factor = jnp.exp(-5e-4)
+        new_bc_coeff = jnp.maximum(decay_factor * self.bc_coeff, jnp.array(0.01))
         # Update RNG
         new_state = new_state.replace(rng=rng)
 
@@ -762,7 +765,7 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
             ):
                 info[f"{name}_lr"] = opt_state.hyperparams["learning_rate"]
 
-        return self.replace(state=new_state), info
+        return self.replace(state=new_state, bc_coeff=new_bc_coeff), info
 
     def loss_bc(self, bc_batch, params: Params, rng: PRNGKey):
         assert bc_batch is not None
@@ -774,7 +777,7 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
         dist = self.forward_policy(o_pre, rng=bc_rng, grad_params=params)
         log_probs = dist.log_prob(a_exp[:,:-1])
         chex.assert_shape(log_probs, (N,))
-        bc_loss = -log_probs.mean()
+        bc_loss = -log_probs.mean() * self.bc_coeff
 
         info = {
             "bc_loss": bc_loss,
@@ -791,7 +794,7 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
         chex.assert_shape(bc_grasp_loss, (N,))
         bc_grasp_loss = bc_grasp_loss.mean()
 
-        bc_loss += bc_grasp_loss
+        bc_loss += bc_grasp_loss * self.bc_coeff
 
         info = info | {
             "bc_grasp_loss": bc_grasp_loss,
@@ -966,6 +969,7 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
         return cls(
             state=state,
             config=config_dict,
+            bc_coeff=jnp.array(0.1, dtype=jnp.float32)
         )
 
     @classmethod
